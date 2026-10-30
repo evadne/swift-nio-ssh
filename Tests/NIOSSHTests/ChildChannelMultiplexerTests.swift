@@ -1129,6 +1129,89 @@ final class ChildChannelMultiplexerTests: XCTestCase {
         }
     }
 
+    func testEOFCanBeSentAfterReceivingEOF() throws {
+        let harness = self.harnessForbiddingInboundChannels()
+        defer {
+            harness.finish()
+        }
+
+        let errorLogger = NIOLoopBound(ErrorLoggingHandler(), eventLoop: harness.eventLoop)
+
+        var childChannel: Channel?
+        harness.multiplexer.createChildChannel(channelType: .session) { channel, _ in
+            childChannel = channel
+            return channel.eventLoop.makeCompletedFuture {
+                // SSH child channel supports sync options so '!' is okay.
+                try channel.syncOptions!.setOption(.allowRemoteHalfClosure, value: true)
+                try channel.pipeline.syncOperations.addHandler(errorLogger.value)
+            }
+        }
+
+        guard let channel = childChannel else {
+            XCTFail("Did not create child channel")
+            return
+        }
+
+        // Activate channel.
+        let channelID = self.assertChannelOpen(harness.flushedMessages.first)
+        XCTAssertNoThrow(
+            try harness.multiplexer.receiveMessage(
+                self.openConfirmation(originalChannelID: channelID!, peerChannelID: 1)
+            )
+        )
+
+        // The peer sends EOF first.
+        XCTAssertNoThrow(try harness.multiplexer.receiveMessage(self.eof(peerChannelID: channelID!)))
+        XCTAssertEqual(harness.flushedMessages.count, 1)
+
+        // Now we send ours. This is fine: the channel is closed in both directions, but stays open.
+        XCTAssertNoThrow(try channel.close(mode: .output).wait())
+        XCTAssertEqual(harness.flushedMessages.count, 2)
+        XCTAssertEqual(SSHMessage.channelEOF(.init(recipientChannel: 1)), harness.flushedMessages.last)
+        XCTAssertTrue(channel.isActive)
+        XCTAssertEqual(errorLogger.value.errors.count, 0)
+    }
+
+    func testEOFCannotBeSentTwice() throws {
+        let harness = self.harnessForbiddingInboundChannels()
+        defer {
+            harness.finish()
+        }
+
+        var childChannel: Channel?
+        harness.multiplexer.createChildChannel(channelType: .session) { channel, _ in
+            childChannel = channel
+            return channel.eventLoop.makeSucceededFuture(())
+        }
+
+        guard let channel = childChannel else {
+            XCTFail("Did not create child channel")
+            return
+        }
+
+        // Activate channel.
+        let channelID = self.assertChannelOpen(harness.flushedMessages.first)
+        XCTAssertNoThrow(
+            try harness.multiplexer.receiveMessage(
+                self.openConfirmation(originalChannelID: channelID!, peerChannelID: 1)
+            )
+        )
+
+        // Send EOF.
+        XCTAssertNoThrow(try channel.close(mode: .output).wait())
+        XCTAssertEqual(harness.flushedMessages.count, 2)
+        XCTAssertEqual(SSHMessage.channelEOF(.init(recipientChannel: 1)), harness.flushedMessages.last)
+
+        // A second EOF is refused, and is not sent.
+        XCTAssertThrowsError(try channel.close(mode: .output).wait()) { error in
+            XCTAssertEqual((error as? NIOSSHError)?.type, .protocolViolation)
+        }
+        XCTAssertEqual(
+            harness.flushedMessages.filter { $0 == SSHMessage.channelEOF(.init(recipientChannel: 1)) }.count,
+            1
+        )
+    }
+
     func testDuplicateCloseFails() throws {
         let harness = self.harnessForbiddingInboundChannels()
         defer {
