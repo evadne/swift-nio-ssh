@@ -67,6 +67,14 @@ public final class NIOSSHHandler {
     /// soon as the state machine allows channel messages again (after our NEWKEYS during a rekey).
     private var pendingChildWrites: CircularBuffer<(SSHMessage, EventLoopPromise<Void>?)>
 
+    // Replies to global requests from the remote peer that want a reply, in the order the requests were received.
+    // RFC 4254 § 4 requires the replies to be sent in that order, but the delegate may complete them in any order,
+    // so a reply is held here (as `nil` until it is ready) until all earlier replies have been sent.
+    private var pendingInboundGlobalRequestReplies: [SSHMessage?]
+
+    // The number of replies to global requests from the remote peer that have been sent so far.
+    private var sentInboundGlobalRequestReplies: Int
+
     /// Construct a new ``NIOSSHHandler``.
     ///
     /// - parameters:
@@ -85,6 +93,8 @@ public final class NIOSSHHandler {
         self.pendingGlobalRequests = CircularBuffer(initialCapacity: 4)
         self.pendingGlobalRequestResponses = CircularBuffer(initialCapacity: 4)
         self.pendingChildWrites = CircularBuffer(initialCapacity: 4)
+        self.pendingInboundGlobalRequestReplies = []
+        self.sentInboundGlobalRequestReplies = 0
         self.multiplexer = SSHChannelMultiplexer(
             delegate: self,
             allocator: allocator,
@@ -408,6 +418,9 @@ extension NIOSSHHandler {
         // It cannot be initialized here, because that would lead to a leaked promise
         let responsePromise: EventLoopPromise<GlobalRequest.TCPForwardingResponse>
 
+        // Take a place in the queue of replies now, so that the reply is sent in request order.
+        let replyIndex = message.wantReply ? self.reserveInboundGlobalRequestReply() : nil
+
         switch message.type {
         case .unknown(let name, let data):
             // We can't tell what this request is or how to respond to it, but the delegate may be able to.
@@ -415,28 +428,25 @@ extension NIOSSHHandler {
 
             // The promise is created on the context's event loop, so this is safe.
             unknownResponsePromise.futureResult.assumeIsolatedUnsafeUnchecked().whenComplete { result in
-                guard message.wantReply else {
+                guard let replyIndex = replyIndex else {
                     // Nothing to do.
                     return
                 }
 
+                let reply: SSHMessage
+                switch result {
+                case .success(let responseData):
+                    reply = .requestSuccess(
+                        .init(.unknown(responseData ?? ByteBuffer()), allocator: context.channel.allocator)
+                    )
+                case .failure:
+                    // We don't care why, we just say no.
+                    reply = .requestFailure
+                }
+
                 do {
-                    switch result {
-                    case .success(let responseData):
-                        try self.writeMessage(
-                            .init(
-                                .requestSuccess(
-                                    .init(.unknown(responseData ?? ByteBuffer()), allocator: context.channel.allocator)
-                                )
-                            ),
-                            context: context
-                        )
-                        context.flush()
-                    case .failure:
-                        // We don't care why, we just say no.
-                        try self.writeMessage(.init(.requestFailure), context: context)
-                        context.flush()
-                    }
+                    try self.sendInboundGlobalRequestReply(reply, at: replyIndex, context: context)
+                    context.flush()
                 } catch {
                     context.fireErrorCaught(error)
                 }
@@ -499,31 +509,50 @@ extension NIOSSHHandler {
 
         // The promise is created a few lines above on the context's event loop, so this is safe.
         responsePromise.futureResult.assumeIsolatedUnsafeUnchecked().whenComplete { result in
-            guard message.wantReply else {
+            guard let replyIndex = replyIndex else {
                 // Nothing to do.
                 return
             }
 
+            let reply: SSHMessage
+            switch result {
+            case .success(let tcpForwardingResponse):
+                reply = .requestSuccess(
+                    .init(.tcpForwarding(tcpForwardingResponse), allocator: context.channel.allocator)
+                )
+            case .failure:
+                // We don't care why, we just say no.
+                reply = .requestFailure
+            }
+
             do {
-                switch result {
-                case .success(let tcpForwardingResponse):
-                    try self.writeMessage(
-                        .init(
-                            .requestSuccess(
-                                .init(.tcpForwarding(tcpForwardingResponse), allocator: context.channel.allocator)
-                            )
-                        ),
-                        context: context
-                    )
-                    context.flush()
-                case .failure:
-                    // We don't care why, we just say no.
-                    try self.writeMessage(.init(.requestFailure), context: context)
-                    context.flush()
-                }
+                try self.sendInboundGlobalRequestReply(reply, at: replyIndex, context: context)
+                context.flush()
             } catch {
                 context.fireErrorCaught(error)
             }
+        }
+    }
+
+    /// Reserves a place for the reply to a global request from the remote peer, and returns its index.
+    private func reserveInboundGlobalRequestReply() -> Int {
+        self.pendingInboundGlobalRequestReplies.append(nil)
+        return self.sentInboundGlobalRequestReplies + self.pendingInboundGlobalRequestReplies.count - 1
+    }
+
+    /// Stores the reply to a global request from the remote peer, and writes all the replies that are
+    /// no longer waiting for an earlier one.
+    private func sendInboundGlobalRequestReply(
+        _ reply: SSHMessage,
+        at replyIndex: Int,
+        context: ChannelHandlerContext
+    ) throws {
+        self.pendingInboundGlobalRequestReplies[replyIndex - self.sentInboundGlobalRequestReplies] = reply
+
+        while let first = self.pendingInboundGlobalRequestReplies.first, let nextReply = first {
+            self.pendingInboundGlobalRequestReplies.removeFirst()
+            self.sentInboundGlobalRequestReplies += 1
+            try self.writeMessage(.init(nextReply), context: context)
         }
     }
 
