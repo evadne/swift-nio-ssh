@@ -444,9 +444,12 @@ final class ScriptedServer {
     ///     - clientMessage: The client's key exchange initialization, if it has sent it already. When rekeying
     ///         the client only sends it in answer to ours.
     ///     - beforeNewKeys: Messages to send between the server's reply and its new keys message.
+    ///     - whileExchanging: Called once both peers have sent their key exchange initialization, before the
+    ///         server replies.
     func exchangeKeys(
         clientMessage: SSHMessage.KeyExchangeMessage? = nil,
-        beforeNewKeys: [SSHMessage] = []
+        beforeNewKeys: [SSHMessage] = [],
+        whileExchanging: () throws -> Void = {}
     ) throws {
         let serverMessage = self.keyExchange.keyExchangeMessage()
         try self.send(.keyExchange(serverMessage))
@@ -460,6 +463,8 @@ final class ScriptedServer {
         guard let clientMessage = clientMessage, case .some(.keyExchangeInit(let keyExchangeInit)) = sent.first else {
             throw NIOSSHError.invalidPacketFormat
         }
+
+        try whileExchanging()
 
         let reply = try self.keyExchange.reply(
             clientVersion: self.clientVersion,

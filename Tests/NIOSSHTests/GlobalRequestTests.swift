@@ -45,9 +45,19 @@ final class GlobalRequestTests: XCTestCase {
         }
     }
 
-    /// A delegate that keeps the promises of the requests ``NIOSSH`` does not know, for the test to complete.
+    /// A delegate that keeps the promises of the requests it is given, for the test to complete.
     private final class HoldingGlobalRequestDelegate: GlobalRequestDelegate {
         var promises: [EventLoopPromise<ByteBuffer?>] = []
+
+        var forwardingPromises: [EventLoopPromise<GlobalRequest.TCPForwardingResponse>] = []
+
+        func tcpForwardingRequest(
+            _ request: GlobalRequest.TCPForwardingRequest,
+            handler: NIOSSHHandler,
+            promise: EventLoopPromise<GlobalRequest.TCPForwardingResponse>
+        ) {
+            self.forwardingPromises.append(promise)
+        }
 
         func unknownGlobalRequest(
             name: String,
@@ -57,6 +67,21 @@ final class GlobalRequestTests: XCTestCase {
             promise: EventLoopPromise<ByteBuffer?>
         ) {
             self.promises.append(promise)
+        }
+    }
+
+    /// A delegate that accepts every host key, at once or when the test completes the promise.
+    private final class HoldableHostKeysDelegate: NIOSSHClientServerAuthenticationDelegate {
+        var hold = false
+
+        var promises: [EventLoopPromise<Void>] = []
+
+        func validateHostKey(hostKey: NIOSSHPublicKey, validationCompletePromise: EventLoopPromise<Void>) {
+            if self.hold {
+                self.promises.append(validationCompletePromise)
+            } else {
+                validationCompletePromise.succeed(())
+            }
         }
     }
 
@@ -72,6 +97,22 @@ final class GlobalRequestTests: XCTestCase {
         try channel.interactInMemory()
         return channel
     }
+
+    /// A client that has authenticated with a server the test plays from the first byte, and which can therefore
+    /// exchange keys again.
+    private func makeAuthenticatedScriptedServer(
+        _ configure: (inout SSHClientConfiguration) -> Void = { _ in }
+    ) throws -> ScriptedServer {
+        let server = try ScriptedServer(configure)
+        try server.exchangeKeys(clientMessage: try server.exchangeVersions())
+        try server.authenticate()
+        return server
+    }
+
+    private static let keepalive = SSHMessage.GlobalRequestMessage(
+        wantReply: true,
+        type: .unknown("keepalive@openssh.com", ByteBuffer())
+    )
 
     func testRequestsAreWrittenWithTheirNameAndData() throws {
         let channel = try self.makeAuthenticatedChannel()
@@ -265,5 +306,65 @@ final class GlobalRequestTests: XCTestCase {
         )
         XCTAssertEqual(try channel.messagesForScriptedServer(), [.requestFailure])
         XCTAssertEqual(delegate.requests, [])
+    }
+
+    func testRepliesCompletedDuringARekeyAreSentAfterIt() throws {
+        let delegate = HoldingGlobalRequestDelegate()
+        let server = try self.makeAuthenticatedScriptedServer { $0.globalRequestDelegate = delegate }
+
+        // Two requests that want a reply. The delegate answers neither yet.
+        XCTAssertNoThrow(
+            try server.send(.globalRequest(.init(wantReply: true, type: .tcpipForward("localhost", 0))))
+        )
+        XCTAssertNoThrow(try server.send(.globalRequest(Self.keepalive)))
+        guard delegate.forwardingPromises.count == 1, delegate.promises.count == 1 else {
+            return XCTFail("Expected one request of each kind")
+        }
+        XCTAssertEqual(try server.clientMessages(), [])
+
+        // The server exchanges keys again, and the delegate answers while it does, the later request first. The
+        // client has sent its key exchange initialization and may send no reply before its new keys message
+        // (RFC 4253 § 7.1).
+        XCTAssertNoThrow(
+            try server.exchangeKeys(whileExchanging: {
+                delegate.promises[0].succeed(ByteBuffer(bytes: [42]))
+                delegate.forwardingPromises[0].succeed(.init(boundPort: 2222))
+                try server.channel.throwIfErrorCaught()
+                XCTAssertEqual(try server.clientMessages(), [])
+            })
+        )
+
+        // The replies follow the new keys message, in the order of the requests.
+        XCTAssertEqual(
+            try server.clientMessages(),
+            [
+                .newKeys,
+                .requestSuccess(.init(buffer: ByteBuffer(integer: UInt32(2222)))),
+                .requestSuccess(.init(buffer: ByteBuffer(bytes: [42]))),
+            ]
+        )
+        XCTAssertNoThrow(try server.channel.throwIfErrorCaught())
+    }
+
+    func testRequestsReceivedBeforeOurNewKeysAreAnsweredAfterThem() throws {
+        let hostKeys = HoldableHostKeysDelegate()
+        let server = try self.makeAuthenticatedScriptedServer { $0.serverAuthDelegate = hostKeys }
+
+        // The server exchanges keys again and sends its new keys message. The client has not sent its own: it is
+        // still asking its delegate about the host key.
+        hostKeys.hold = true
+        XCTAssertNoThrow(try server.exchangeKeys())
+        XCTAssertEqual(hostKeys.promises.count, 1)
+        XCTAssertEqual(try server.clientMessages(), [])
+
+        // The server may send what it likes after its new keys message, and an OpenSSH server that has no channel
+        // open sends this request at its `ClientAliveInterval`. The client refuses it, which is a reply, but
+        // cannot send it yet.
+        XCTAssertNoThrow(try server.send(.globalRequest(Self.keepalive)))
+        XCTAssertEqual(try server.clientMessages(), [])
+
+        hostKeys.promises[0].succeed(())
+        XCTAssertEqual(try server.clientMessages(), [.newKeys, .requestFailure])
+        XCTAssertNoThrow(try server.channel.throwIfErrorCaught())
     }
 }

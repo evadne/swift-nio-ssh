@@ -761,6 +761,53 @@ class EndToEndTests: XCTestCase {
         XCTAssertEqual(writeError.value as? ChannelError, .ioOnClosedChannel)
     }
 
+    /// Has `requester` send a global request that reaches `rekeyer` while it is mid-rekey, and checks that the
+    /// reply is held until the rekey completes and then delivered.
+    private func assertGlobalRequestReceivedDuringRekeyIsAnswered(
+        rekeyer: NIOSSHHandler,
+        requester: NIOSSHHandler
+    ) throws {
+        // The rekeyer has now sent KEXINIT and must not send a reply until its NEWKEYS. Its peer has not read
+        // the KEXINIT yet, and is free to send a request.
+        XCTAssertNoThrow(try rekeyer._rekey())
+
+        let result = NIOLoopBoundBox<Result<ByteBuffer?, Error>?>(nil, eventLoop: self.channel.client.eventLoop)
+        let promise = self.channel.client.eventLoop.makePromise(of: ByteBuffer?.self)
+        promise.futureResult.whenComplete { result.value = $0 }
+        requester.sendGlobalRequest(name: "keepalive@openssh.com", wantReply: true, promise: promise)
+
+        // The rekeyer refuses the request, which is a reply. It goes out after the rekey and the peer sees it.
+        XCTAssertNoThrow(try self.channel.interactInMemory())
+        guard case .some(.failure(let error)) = result.value else {
+            return XCTFail("Expected the request to have been refused, got \(String(describing: result.value))")
+        }
+        XCTAssertEqual((error as? NIOSSHError)?.type, .globalRequestRefused)
+    }
+
+    func testGlobalRequestReceivedByClientDuringRekeyIsAnsweredAfterwards() throws {
+        XCTAssertNoThrow(try self.channel.configureWithHarness(TestHarness()))
+        XCTAssertNoThrow(try self.channel.activate())
+        XCTAssertNoThrow(try self.channel.interactInMemory())
+
+        // The client sends its NEWKEYS from the key exchange future, so this exercises that path.
+        try self.assertGlobalRequestReceivedDuringRekeyIsAnswered(
+            rekeyer: self.channel.clientSSHHandler!,
+            requester: self.channel.serverSSHHandler!
+        )
+    }
+
+    func testGlobalRequestReceivedByServerDuringRekeyIsAnsweredAfterwards() throws {
+        XCTAssertNoThrow(try self.channel.configureWithHarness(TestHarness()))
+        XCTAssertNoThrow(try self.channel.activate())
+        XCTAssertNoThrow(try self.channel.interactInMemory())
+
+        // The server sends its NEWKEYS from channelRead, so this exercises that path.
+        try self.assertGlobalRequestReceivedDuringRekeyIsAnswered(
+            rekeyer: self.channel.serverSSHHandler!,
+            requester: self.channel.clientSSHHandler!
+        )
+    }
+
     func testDelayedHostKeyValidation() throws {
         class DelayedValidationDelegate: NIOSSHClientServerAuthenticationDelegate {
             var validationCount = 0

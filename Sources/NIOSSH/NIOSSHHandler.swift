@@ -69,7 +69,8 @@ public final class NIOSSHHandler {
 
     // Replies to global requests from the remote peer that want a reply, in the order the requests were received.
     // RFC 4254 § 4 requires the replies to be sent in that order, but the delegate may complete them in any order,
-    // so a reply is held here (as `nil` until it is ready) until all earlier replies have been sent.
+    // so a reply is held here (as `nil` until it is ready) until all earlier replies have been sent. A reply that
+    // is ready during a key exchange is held here as well, until the state machine allows it to be sent.
     private var pendingInboundGlobalRequestReplies: [SSHMessage?]
 
     // The number of replies to global requests from the remote peer that have been sent so far.
@@ -202,6 +203,7 @@ extension NIOSSHHandler: ChannelDuplexHandler {
                 try self.processInboundMessageResult(result, context: context)
             }
             self.drainPendingChildWritesIfPossible(context: context)
+            try self.sendInboundGlobalRequestRepliesIfPossible(context: context)
         } catch {
             context.fireErrorCaught(error)
         }
@@ -259,6 +261,14 @@ extension NIOSSHHandler: ChannelDuplexHandler {
                         self.drainPendingChildWritesIfPossible(context: context)
                         self.pendingWrite = false
                         context.flush()
+
+                        // If that was our NEWKEYS, the replies to global requests that were held back can go too.
+                        // We do this after the flush so that a reply that cannot be written does not hold it up.
+                        try self.sendInboundGlobalRequestRepliesIfPossible(context: context)
+                        if self.pendingWrite {
+                            self.pendingWrite = false
+                            context.flush()
+                        }
                     } catch {
                         context.fireErrorCaught(error)
                     }
@@ -553,6 +563,18 @@ extension NIOSSHHandler {
         context: ChannelHandlerContext
     ) throws {
         self.pendingInboundGlobalRequestReplies[replyIndex - self.sentInboundGlobalRequestReplies] = reply
+        try self.sendInboundGlobalRequestRepliesIfPossible(context: context)
+    }
+
+    /// Writes the replies to global requests from the remote peer that are ready and are not waiting for an
+    /// earlier one. Called when a reply becomes ready, and whenever inbound processing may have moved the state
+    /// machine out of the rekeying states.
+    private func sendInboundGlobalRequestRepliesIfPossible(context: ChannelHandlerContext) throws {
+        // Mid-rekey: RFC 4253 § 7.1 forbids a reply as it does a child channel message, so the replies stay where
+        // they are until our NEWKEYS is out.
+        guard !self.stateMachine.isRekeyingBeforeNewKeys else {
+            return
+        }
 
         while let first = self.pendingInboundGlobalRequestReplies.first, let nextReply = first {
             self.pendingInboundGlobalRequestReplies.removeFirst()
