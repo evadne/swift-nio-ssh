@@ -651,7 +651,7 @@ extension ByteBuffer {
                 let principals = rawPrincipals.readPrincipals(),
                 let criticalOptions = try rawCriticalOptions.readMapStringToString(),
                 let extensions = try rawExtensions.readMapStringToString(),
-                let signatureKey = try rawSignatureKey.readSSHHostKey(),
+                let signatureKey = try rawSignatureKey.readCertificateSignatureKey(),
                 let signature = try rawSignature.readSSHSignature()
             else {
                 throw NIOSSHError.invalidSSHMessage(reason: "invalid encoding of certified key")
@@ -671,6 +671,28 @@ extension ByteBuffer {
                 signatureKey: signatureKey,
                 signature: signature
             )
+        }
+    }
+
+    /// Reads the key that signed a certificate.
+    ///
+    /// A certificate is signed by a plain key, never by another certificate. A signature key that is a certificate
+    /// is rejected by its key format identifier, before anything else of it is read.
+    private mutating func readCertificateSignatureKey() throws -> NIOSSHPublicKey? {
+        try self.rewindOnNilOrError { buffer in
+            guard let keyIdentifierBytes = buffer.readSSHString() else {
+                return nil
+            }
+            let keyIdentifier = keyIdentifierBytes.readableBytesView
+
+            // This check is _very important_: reading a certificate reads its signature key, so if that key could
+            // itself be a certificate we would recurse once for each certificate that a peer nested within another,
+            // and the peer could make us run out of stack.
+            guard (try? NIOSSHCertifiedPublicKey.baseKeyPrefixForKeyPrefix(keyIdentifier)) == nil else {
+                throw NIOSSHError.invalidCertificate(diagnostics: "Certificate may not be signed by certified key")
+            }
+
+            return try buffer.readPublicKeyWithoutPrefixForIdentifier(keyIdentifier)
         }
     }
 

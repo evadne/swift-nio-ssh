@@ -13,6 +13,7 @@
 //===----------------------------------------------------------------------===//
 
 import Crypto
+import Dispatch
 import Foundation
 import NIOCore
 import XCTest
@@ -644,4 +645,179 @@ final class CertifiedKeyTests: XCTestCase {
         let caKey = try NIOSSHPublicKey(openSSHPublicKey: Fixtures.caPublicKey)
         XCTAssertNil(NIOSSHCertifiedPublicKey(caKey))
     }
+
+    /// The wire encoding of an Ed25519 host certificate that has `depth` certificates nested within it: each
+    /// certificate is the signature key of the one that contains it, and the innermost is signed by a plain key.
+    ///
+    /// This is written by hand, as `NIOSSHCertifiedPublicKey` cannot hold a certificate as its signature key. The
+    /// signature is not made over the certificate: reading a certificate does not verify it.
+    private func encodedCertificate(nestedCertificates depth: Int) throws -> ByteBuffer {
+        let key = NIOSSHPrivateKey(ed25519Key: .init())
+        let signature = try key.sign(digest: SHA256.hash(data: Array("certificate".utf8)))
+
+        var encoded = ByteBuffer()
+        encoded.writeSSHHostKey(key.publicKey)
+        for _ in 0...depth {
+            encoded = self.encodedCertificate(for: key.publicKey, signatureKey: encoded, signature: signature)
+        }
+        return encoded
+    }
+
+    /// The wire encoding of an Ed25519 host certificate for `key` whose signature key is the bytes of `signatureKey`.
+    private func encodedCertificate(
+        for key: NIOSSHPublicKey,
+        signatureKey: ByteBuffer,
+        signature: NIOSSHSignature
+    ) -> ByteBuffer {
+        var buffer = ByteBuffer()
+        buffer.writeSSHString(NIOSSHCertifiedPublicKey.ed25519KeyPrefix)
+        buffer.writeSSHString(Array(repeating: UInt8(0), count: 32))  // nonce
+        buffer.writePublicKeyWithoutPrefix(key)
+        buffer.writeInteger(UInt64(0))  // serial
+        buffer.writeInteger(NIOSSHCertifiedPublicKey.CertificateType.host.rawValue)
+        buffer.writeSSHString("".utf8)  // key ID
+        buffer.writeSSHString("".utf8)  // valid principals
+        buffer.writeInteger(UInt64.min)  // valid after
+        buffer.writeInteger(UInt64.max)  // valid before
+        buffer.writeSSHString("".utf8)  // critical options
+        buffer.writeSSHString("".utf8)  // extensions
+        buffer.writeSSHString("".utf8)  // reserved
+        buffer.writeSSHString(signatureKey.readableBytesView)
+        buffer.writeCompositeSSHString { $0.writeSSHSignature(signature) }
+        return buffer
+    }
+
+    /// Frames `payload` as a packet that has not been encrypted, as packets are before key exchange completes.
+    private func cleartextPacket(_ payload: ByteBuffer) -> ByteBuffer {
+        // RFC 4253 § 6: at least four bytes of padding, and a total length that is a multiple of eight.
+        var paddingLength = 8 - (5 + payload.readableBytes) % 8
+        if paddingLength < 4 {
+            paddingLength += 8
+        }
+
+        var packet = ByteBuffer()
+        packet.writeInteger(UInt32(1 + payload.readableBytes + paddingLength))
+        packet.writeInteger(UInt8(paddingLength))
+        packet.writeImmutableBuffer(payload)
+        packet.writeRepeatingByte(0, count: paddingLength)
+        return packet
+    }
+
+    /// Runs `body` on a new thread that has a stack of 512 KiB, and waits for it.
+    ///
+    /// This is the stack that macOS gives to a thread other than the main one, such as an event loop thread of
+    /// NIOPosix. The main thread, on which tests otherwise run, has many times more.
+    private func onThreadWithSmallStack<Value: Sendable>(
+        _ body: @escaping @Sendable () throws -> Value
+    ) throws -> Value {
+        let outcome = ThreadOutcome<Value>()
+        let finished = DispatchSemaphore(value: 0)
+        let thread = Thread {
+            outcome.result = Result { try body() }
+            finished.signal()
+        }
+        thread.stackSize = 512 * 1024
+        thread.start()
+        finished.wait()
+        return try outcome.result!.get()
+    }
+
+    func testCertificateSignedByCertificateIsRejected() throws {
+        // The certificate that we write by hand is one that we can read.
+        var plainlySigned = try self.encodedCertificate(nestedCertificates: 0)
+        XCTAssertNotNil(try plainlySigned.readSSHHostKey().flatMap(NIOSSHCertifiedPublicKey.init))
+        XCTAssertEqual(plainlySigned.readableBytes, 0)
+
+        let nested = try self.encodedCertificate(nestedCertificates: 1)
+        var buffer = nested
+        XCTAssertThrowsError(try buffer.readSSHHostKey()) { error in
+            XCTAssertEqual((error as? NIOSSHError)?.type, .invalidCertificate)
+        }
+        XCTAssertEqual(buffer, nested)
+
+        let openSSHPublicKey =
+            "ssh-ed25519-cert-v01@openssh.com " + Data(nested.readableBytesView).base64EncodedString()
+        XCTAssertThrowsError(try NIOSSHPublicKey(openSSHPublicKey: openSSHPublicKey)) { error in
+            XCTAssertEqual((error as? NIOSSHError)?.type, .invalidCertificate)
+        }
+    }
+
+    func testCertificateSignedByCertificateIsRejectedByFormatIdentifierAlone() throws {
+        let key = NIOSSHPrivateKey(ed25519Key: .init())
+        let signature = try key.sign(digest: SHA256.hash(data: Array("certificate".utf8)))
+
+        let certificateFormatIdentifiers = [
+            NIOSSHCertifiedPublicKey.ed25519KeyPrefix,
+            NIOSSHCertifiedPublicKey.p256KeyPrefix,
+            NIOSSHCertifiedPublicKey.p384KeyPrefix,
+            NIOSSHCertifiedPublicKey.p521KeyPrefix,
+        ]
+
+        // The signature key is refused once its format identifier says that it is a certificate. Nothing that
+        // follows the identifier is read, so here nothing follows it.
+        for identifier in certificateFormatIdentifiers {
+            var signatureKey = ByteBuffer()
+            signatureKey.writeSSHString(identifier)
+
+            var buffer = self.encodedCertificate(for: key.publicKey, signatureKey: signatureKey, signature: signature)
+            XCTAssertThrowsError(try buffer.readSSHHostKey(), String(identifier)) { error in
+                XCTAssertEqual((error as? NIOSSHError)?.type, .invalidCertificate, String(identifier))
+            }
+        }
+    }
+
+    func testCertificateSignedByDeeplyNestedCertificatesIsRejected() throws {
+        // Reading a certificate must not recurse for each certificate that is nested within it: the peer chooses how
+        // many there are. This many fit in one packet before key exchange completes, and reading them recursively
+        // takes more stack than the thread has.
+        let nested = try self.encodedCertificate(nestedCertificates: 900)
+        let key = NIOSSHPrivateKey(ed25519Key: .init())
+        let signature = try key.sign(digest: SHA256.hash(data: Array("exchange hash".utf8)))
+
+        // A server sends its host key to a client in the key exchange reply.
+        var keyExchangeReply = ByteBuffer()
+        keyExchangeReply.writeInteger(SSHMessage.KeyExchangeECDHReplyMessage.id)
+        keyExchangeReply.writeSSHString(nested.readableBytesView)
+        keyExchangeReply.writeSSHString(Array(repeating: UInt8(0), count: 32))
+        keyExchangeReply.writeCompositeSSHString { $0.writeSSHSignature(signature) }
+
+        // A client sends a public key to a server in a user authentication request.
+        var userAuthRequest = ByteBuffer()
+        userAuthRequest.writeInteger(SSHMessage.UserAuthRequestMessage.id)
+        userAuthRequest.writeSSHString("user".utf8)
+        userAuthRequest.writeSSHString("ssh-connection".utf8)
+        userAuthRequest.writeSSHString("publickey".utf8)
+        userAuthRequest.writeSSHBoolean(false)
+        userAuthRequest.writeSSHString(NIOSSHPublicKey.ed25519PublicKeyPrefix)
+        userAuthRequest.writeSSHString(nested.readableBytesView)
+
+        // Each is parsed as soon as its packet arrives, whatever the state of the connection.
+        for (isServer, message) in [(false, keyExchangeReply), (true, userAuthRequest)] {
+            let packet = self.cleartextPacket(message)
+
+            let error = try self.onThreadWithSmallStack { () -> (any Error)? in
+                var parser = SSHPacketParser(isServer: isServer, allocator: ByteBufferAllocator())
+                var bytes = ByteBuffer(string: "SSH-2.0-Peer\r\n")
+                bytes.writeImmutableBuffer(packet)
+                parser.append(bytes: &bytes)
+
+                do {
+                    _ = try parser.nextPacket()  // the version
+                    _ = try parser.nextPacket()
+                    return nil
+                } catch {
+                    return error
+                }
+            }
+
+            // The certificate is refused for what it is: the packet was not too long to be parsed.
+            XCTAssertEqual((error as? NIOSSHError)?.type, .invalidCertificate, "\(String(describing: error))")
+        }
+    }
+}
+
+/// What a thread made of the work that it was given.
+private final class ThreadOutcome<Value: Sendable>: @unchecked Sendable {
+    // The thread writes this once, before it signals that it has finished. Nothing reads it until then.
+    var result: Result<Value, any Error>?
 }
