@@ -280,6 +280,11 @@ struct SSHConnectionStateMachine {
                         self = .receivedNewKeys(state)
                         return result
 
+                    case .extensionInfo(let message):
+                        // A server sends this straight after its newKeys message, which may be before ours.
+                        self = .receivedNewKeys(state)
+                        return .event(NIOSSHExtensionInfoEvent(message))
+
                     case .disconnect(let message):
                         self = .receivedDisconnect(state.role)
                         return .disconnect(message)
@@ -359,6 +364,12 @@ struct SSHConnectionStateMachine {
                         let result = try state.receiveUserAuthInfoRequest(message)
                         self = .userAuthentication(state)
                         return result
+
+                    case .extensionInfo(let message):
+                        // A server may send this straight after its newKeys message, and again just before it
+                        // tells us that user authentication succeeded (RFC 8308 § 2.4).
+                        self = .userAuthentication(state)
+                        return .event(NIOSSHExtensionInfoEvent(message))
 
                     case .disconnect(let message):
                         self = .receivedDisconnect(state.role)

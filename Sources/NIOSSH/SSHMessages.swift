@@ -29,6 +29,7 @@ enum SSHMessage: Equatable {
     case debug(DebugMessage)
     case serviceRequest(ServiceRequestMessage)
     case serviceAccept(ServiceAcceptMessage)
+    case extensionInfo(ExtensionInfoMessage)
     case keyExchange(KeyExchangeMessage)
     case keyExchangeInit(KeyExchangeECDHInitMessage)
     case keyExchangeReply(KeyExchangeECDHReplyMessage)
@@ -95,6 +96,14 @@ extension SSHMessage {
         static let id: UInt8 = 6
 
         var service: String
+    }
+
+    // RFC 8308 § 2.3
+    struct ExtensionInfoMessage: Equatable {
+        // SSH_MSG_EXT_INFO
+        static let id: UInt8 = 7
+
+        var extensions: [NIOSSHExtensionInfoEvent.Extension]
     }
 
     struct KeyExchangeMessage: Equatable {
@@ -395,9 +404,11 @@ extension ByteBuffer {
     ///     - customHostKeyTypes: The types of host key of a custom kind that the peer may present.
     ///     - expectingUserAuthInfoRequest: Whether message number 60 is `SSH_MSG_USERAUTH_INFO_REQUEST`, as it is
     ///         while keyboard-interactive authentication is in progress, and not `SSH_MSG_USERAUTH_PK_OK`.
+    ///     - expectingExtensionInfo: Whether `SSH_MSG_EXT_INFO` may be received. If not, it is an unknown type.
     mutating func readSSHMessage(
         customHostKeyTypes: [any NIOSSHVerifyingPublicKeyProtocol.Type] = [],
-        expectingUserAuthInfoRequest: Bool = false
+        expectingUserAuthInfoRequest: Bool = false,
+        expectingExtensionInfo: Bool = false
     ) throws -> SSHMessage? {
         try self.rewindOnNilOrError { `self` in
             guard let type = self.readInteger(as: UInt8.self) else {
@@ -435,6 +446,11 @@ extension ByteBuffer {
                     return nil
                 }
                 return .serviceAccept(message)
+            case SSHMessage.ExtensionInfoMessage.id where expectingExtensionInfo:
+                guard let message = try self.readExtensionInfoMessage() else {
+                    return nil
+                }
+                return .extensionInfo(message)
             case SSHMessage.KeyExchangeMessage.id:
                 guard let message = self.readKeyExchangeMessage() else {
                     return nil
@@ -621,6 +637,36 @@ extension ByteBuffer {
                 return nil
             }
             return SSHMessage.ServiceAcceptMessage(service: service)
+        }
+    }
+
+    mutating func readExtensionInfoMessage() throws -> SSHMessage.ExtensionInfoMessage? {
+        try self.rewindOnNilOrError { `self` in
+            guard let extensionCount = self.readInteger(as: UInt32.self) else {
+                return nil
+            }
+
+            // The count is chosen by the peer: check it before we use it for anything. Each extension is two
+            // strings, so it takes eight bytes at the least.
+            guard extensionCount <= self.readableBytes / 8 else {
+                throw NIOSSHError.invalidSSHMessage(reason: "extension info claims \(extensionCount) extensions")
+            }
+
+            var extensions: [NIOSSHExtensionInfoEvent.Extension] = []
+            extensions.reserveCapacity(Int(extensionCount))
+
+            for _ in 0..<extensionCount {
+                guard
+                    let name = self.readSSHStringAsString(),
+                    let value = self.readSSHString()
+                else {
+                    return nil
+                }
+
+                extensions.append(.init(name: name, value: value))
+            }
+
+            return SSHMessage.ExtensionInfoMessage(extensions: extensions)
         }
     }
 
@@ -1319,6 +1365,9 @@ extension ByteBuffer {
         case .serviceAccept(let message):
             writtenBytes += self.writeInteger(SSHMessage.ServiceAcceptMessage.id)
             writtenBytes += self.writeServiceAcceptMessage(message)
+        case .extensionInfo(let message):
+            writtenBytes += self.writeInteger(SSHMessage.ExtensionInfoMessage.id)
+            writtenBytes += self.writeExtensionInfoMessage(message)
         case .keyExchange(let message):
             writtenBytes += self.writeInteger(SSHMessage.KeyExchangeMessage.id)
             writtenBytes += self.writeKeyExchangeMessage(message)
@@ -1425,6 +1474,17 @@ extension ByteBuffer {
 
     mutating func writeServiceAcceptMessage(_ message: SSHMessage.ServiceAcceptMessage) -> Int {
         self.writeSSHString(message.service.utf8)
+    }
+
+    mutating func writeExtensionInfoMessage(_ message: SSHMessage.ExtensionInfoMessage) -> Int {
+        var writtenBytes = self.writeInteger(UInt32(message.extensions.count))
+
+        for var `extension` in message.extensions {
+            writtenBytes += self.writeSSHString(`extension`.name.utf8)
+            writtenBytes += self.writeSSHString(&`extension`.value)
+        }
+
+        return writtenBytes
     }
 
     mutating func writeKeyExchangeMessage(_ message: SSHMessage.KeyExchangeMessage) -> Int {

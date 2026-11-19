@@ -84,6 +84,16 @@ public struct SSHClientConfiguration {
     /// stream of some transport protection schemes without being detected.
     public var strictKeyExchange: Bool = false
 
+    /// Whether this client offers extension negotiation (`ext-info-c`, RFC 8308). Defaults to `false`.
+    ///
+    /// A server that supports extension negotiation then sends its extensions once keys have been exchanged,
+    /// and they are fired on the channel as a ``NIOSSHExtensionInfoEvent`` before user authentication begins.
+    /// Among them is usually `server-sig-algs`, the public key algorithms that the server accepts for user
+    /// authentication: this is how a client finds out which of `rsa-sha2-256` and `rsa-sha2-512` a server takes.
+    ///
+    /// ``NIOSSH`` acts on no extension itself, and sends none.
+    public var extensionNegotiation: Bool = false
+
     /// Whether this client offers the OpenSSH host certificate algorithms (`*-cert-v01@openssh.com`) ahead of
     /// the plain host key algorithms. Defaults to `false`.
     ///

@@ -132,6 +132,9 @@ struct SSHKeyExchangeStateMachine {
         let macAlgorithms = self.supportedMacAlgorithms
 
         var keyExchangeAlgorithms = Self.supportedKeyExchangeAlgorithms
+        if self.offersExtensionNegotiation {
+            keyExchangeAlgorithms.append(Self.extensionNegotiationClientMarker)
+        }
         if self.offersStrictKeyExchange {
             keyExchangeAlgorithms.append(Self.strictKeyExchangeClientMarker)
         }
@@ -593,6 +596,12 @@ struct SSHKeyExchangeStateMachine {
         return configuration.strictKeyExchange
     }
 
+    /// Whether we offer extension negotiation in this key exchange. Like strict key exchange, it is offered by
+    /// clients that are configured to, in the first key exchange of a connection.
+    private var offersExtensionNegotiation: Bool {
+        self.previousSessionIdentifier == nil && self.role.extensionNegotiation
+    }
+
     // The host key algorithms supported by this peer, in order of preference.
     private var supportedHostKeyAlgorithms: [Substring] {
         switch self.role {
@@ -646,6 +655,10 @@ extension SSHKeyExchangeStateMachine {
     /// exchange algorithms, but they are not algorithms and are never negotiated as one.
     static let strictKeyExchangeClientMarker: Substring = "kex-strict-c-v00@openssh.com"
     static let strictKeyExchangeServerMarker: Substring = "kex-strict-s-v00@openssh.com"
+
+    /// The name with which a client offers extension negotiation (RFC 8308 § 2.1). Like the names above, this is
+    /// listed among the key exchange algorithms and is not one.
+    static let extensionNegotiationClientMarker: Substring = "ext-info-c"
 
     /// All known host key algorithms.
     static let supportedServerHostKeyAlgorithms: [Substring] = [

@@ -39,7 +39,8 @@ extension SSHConnectionStateMachine {
                 isServer: self.role.isServer,
                 allocator: allocator,
                 maximumPacketSize: self.role.maximumPacketSize,
-                customHostKeyTypes: self.role.customHostKeyTypes
+                customHostKeyTypes: self.role.customHostKeyTypes,
+                expectingExtensionInfo: self.role.extensionNegotiation
             )
             self.allocator = allocator
         }

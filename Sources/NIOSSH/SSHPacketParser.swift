@@ -49,6 +49,10 @@ struct SSHPacketParser {
     /// The types of host key of a custom kind that the peer may present.
     private let customHostKeyTypes: [any NIOSSHVerifyingPublicKeyProtocol.Type]
 
+    /// Whether the peer may send `SSH_MSG_EXT_INFO`. If it may not, that message is of an unknown type, as it
+    /// always was.
+    private let expectingExtensionInfo: Bool
+
     /// Whether strict key exchange is in force for this connection. If it is, the sequence number starts again
     /// from zero whenever new keys are taken into use.
     var strictKeyExchange: Bool = false
@@ -71,7 +75,8 @@ struct SSHPacketParser {
         isServer: Bool,
         allocator: ByteBufferAllocator,
         maximumPacketSize: UInt32 = UInt32(Constants.defaultMaximumChannelPacketSize),
-        customHostKeyTypes: [any NIOSSHVerifyingPublicKeyProtocol.Type] = []
+        customHostKeyTypes: [any NIOSSHVerifyingPublicKeyProtocol.Type] = [],
+        expectingExtensionInfo: Bool = false
     ) {
         precondition(
             maximumPacketSize >= Constants.minimumChannelPacketSize,
@@ -89,6 +94,7 @@ struct SSHPacketParser {
         self.maximumEncryptedPacketLength = maximumPacketSize + 1024
         self.preambleLineCount = 0
         self.customHostKeyTypes = customHostKeyTypes
+        self.expectingExtensionInfo = expectingExtensionInfo
     }
 
     mutating func append(bytes: inout ByteBuffer) {
@@ -362,7 +368,8 @@ struct SSHPacketParser {
             guard
                 let message = try content.readSSHMessage(
                     customHostKeyTypes: self.customHostKeyTypes,
-                    expectingUserAuthInfoRequest: self.expectingUserAuthInfoRequest
+                    expectingUserAuthInfoRequest: self.expectingUserAuthInfoRequest,
+                    expectingExtensionInfo: self.expectingExtensionInfo
                 ),
                 content.readableBytes == 0, buffer.readableBytes == 0
             else {
@@ -384,7 +391,8 @@ struct SSHPacketParser {
             guard
                 let message = try content.readSSHMessage(
                     customHostKeyTypes: self.customHostKeyTypes,
-                    expectingUserAuthInfoRequest: self.expectingUserAuthInfoRequest
+                    expectingUserAuthInfoRequest: self.expectingUserAuthInfoRequest,
+                    expectingExtensionInfo: self.expectingExtensionInfo
                 ),
                 content.readableBytes == 0, buffer.readableBytes == 0
             else {

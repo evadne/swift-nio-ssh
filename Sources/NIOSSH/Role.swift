@@ -58,6 +58,17 @@ public enum SSHConnectionRole {
         }
     }
 
+    /// Whether the peer may send `SSH_MSG_EXT_INFO`: it may if we are a client that offered extension
+    /// negotiation.
+    internal var extensionNegotiation: Bool {
+        switch self {
+        case .client(let configuration):
+            return configuration.extensionNegotiation
+        case .server:
+            return false
+        }
+    }
+
     /// The types of host key of a custom kind that the peer may present. Only clients are presented with host keys.
     internal var customHostKeyTypes: [any NIOSSHVerifyingPublicKeyProtocol.Type] {
         switch self {
