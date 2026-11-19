@@ -39,6 +39,27 @@ public protocol NIOSSHClientUserAuthenticationDelegate {
         nextChallengePromise: EventLoopPromise<NIOSSHUserAuthenticationOffer?>
     )
 
+    /// Called when ``NIOSSH`` would like to attempt to offer a new authentication method, and can say whether
+    /// the server accepted the last one.
+    ///
+    /// A server that requires several authentication methods answers an offer it accepts with a list of the
+    /// methods that it still requires, and marks that answer as a partial success (RFC 4252 § 5.1). An offer it
+    /// rejects is answered with a list of methods too, so only the mark tells the two apart.
+    ///
+    /// This is called in place of ``nextAuthenticationType(availableMethods:nextChallengePromise:)``. The default
+    /// implementation calls that method and discards `partialSuccess`.
+    ///
+    /// - parameters:
+    ///     - availableMethods: The authentication methods the server is willing to accept.
+    ///     - partialSuccess: Whether the server accepted the last offer and requires more. This is `false` when
+    ///         no offer has been made yet.
+    ///     - nextChallengePromise: An `EventLoopPromise` to be fulfilled with the next authentication offer.
+    func nextAuthenticationType(
+        availableMethods: NIOSSHAvailableUserAuthenticationMethods,
+        partialSuccess: Bool,
+        nextChallengePromise: EventLoopPromise<NIOSSHUserAuthenticationOffer?>
+    )
+
     /// Called when the server issues a challenge during keyboard-interactive authentication (RFC 4256).
     ///
     /// This is only called after the delegate has offered
@@ -63,6 +84,14 @@ public protocol NIOSSHClientUserAuthenticationDelegate {
 }
 
 extension NIOSSHClientUserAuthenticationDelegate {
+    public func nextAuthenticationType(
+        availableMethods: NIOSSHAvailableUserAuthenticationMethods,
+        partialSuccess: Bool,
+        nextChallengePromise: EventLoopPromise<NIOSSHUserAuthenticationOffer?>
+    ) {
+        self.nextAuthenticationType(availableMethods: availableMethods, nextChallengePromise: nextChallengePromise)
+    }
+
     public func respondToKeyboardInteractiveChallenge(
         _ challenge: NIOSSHKeyboardInteractiveChallenge,
         responsePromise: EventLoopPromise<[String]>
