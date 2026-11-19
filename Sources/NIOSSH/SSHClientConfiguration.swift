@@ -64,6 +64,24 @@ public struct SSHClientConfiguration {
     /// principals, the validity window and the critical options before it trusts the certificate.
     public var advertiseHostCertificateAlgorithms: Bool = false
 
+    /// The types of host key that this client accepts in addition to the Ed25519 and ECDSA keys that ``NIOSSH``
+    /// has built in. Defaults to none.
+    ///
+    /// The client proposes the ``NIOSSHVerifyingPublicKeyProtocol/signatureAlgorithms`` of each type as host key
+    /// algorithms, after the built-in ones and in the order given here. A server that has a host key of a built-in
+    /// kind therefore still presents that. A host key of one of these types is passed to
+    /// ``NIOSSHClientServerAuthenticationDelegate/validateHostKey(hostKey:validationCompletePromise:)`` like any
+    /// other, once the type has verified the server's signature.
+    ///
+    /// - Precondition: No two types may share a key format or an algorithm, and none may use the name of a
+    ///   built-in key format or algorithm.
+    /// - Precondition: No type may list the algorithm `ssh-rsa`, which signs with SHA-1.
+    public var customHostKeyTypes: [any NIOSSHVerifyingPublicKeyProtocol.Type] = [] {
+        didSet {
+            self.customHostKeyTypes.validateAsHostKeyTypes()
+        }
+    }
+
     public init(
         userAuthDelegate: NIOSSHClientUserAuthenticationDelegate,
         serverAuthDelegate: NIOSSHClientServerAuthenticationDelegate,

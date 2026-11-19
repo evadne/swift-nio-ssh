@@ -69,7 +69,8 @@ public struct NIOSSHPublicKey: Sendable, Hashable {
 
     /// Create a ``NIOSSHPublicKey`` from a public key of a kind that ``NIOSSH`` does not have built in.
     ///
-    /// ``NIOSSH`` can send such a key to a peer, but cannot use it to verify a signature.
+    /// ``NIOSSH`` can send such a key to a peer. It can use the key to verify a signature only if `Key` conforms
+    /// to ``NIOSSHVerifyingPublicKeyProtocol``.
     public init<Key: NIOSSHPublicKeyProtocol>(custom key: Key) {
         self.backingKey = .custom(key)
     }
@@ -101,6 +102,10 @@ extension NIOSSHPublicKey {
             return digest.withUnsafeBytes { digestPtr in
                 key.isValidSignature(sig, for: digestPtr)
             }
+        case (.custom(let key), .custom(let algorithm, let blob)):
+            return digest.withUnsafeBytes { digestPtr in
+                key.isValidCustomSignature(blob, algorithm: algorithm, for: digestPtr)
+            }
         case (.certified(let key), _):
             return key.isValidSignature(signature, for: digest)
         case (.ed25519, _),
@@ -108,7 +113,6 @@ extension NIOSSHPublicKey {
             (.ecdsaP384, _),
             (.ecdsaP521, _),
             (.custom, _):
-            // We cannot verify with a key of a custom kind.
             return false
         }
     }
@@ -125,6 +129,8 @@ extension NIOSSHPublicKey {
             return key.isValidSignature(sig, for: bytes.readableBytesView)
         case (.ecdsaP521(let key), .ecdsaP521(let sig)):
             return key.isValidSignature(sig, for: bytes.readableBytesView)
+        case (.custom(let key), .custom(let algorithm, let blob)):
+            return key.isValidCustomSignature(blob, algorithm: algorithm, for: bytes.readableBytesView)
         case (.certified(let key), _):
             return key.isValidSignature(signature, for: bytes)
         case (.ed25519, _),
@@ -132,7 +138,6 @@ extension NIOSSHPublicKey {
             (.ecdsaP384, _),
             (.ecdsaP521, _),
             (.custom, _):
-            // We cannot verify with a key of a custom kind.
             return false
         }
     }
@@ -149,6 +154,8 @@ extension NIOSSHPublicKey {
             return key.isValidSignature(sig, for: payload.bytes.readableBytesView)
         case (.ecdsaP521(let key), .ecdsaP521(let sig)):
             return key.isValidSignature(sig, for: payload.bytes.readableBytesView)
+        case (.custom(let key), .custom(let algorithm, let blob)):
+            return key.isValidCustomSignature(blob, algorithm: algorithm, for: payload.bytes.readableBytesView)
         case (.certified(let key), _):
             return key.isValidSignature(signature, for: payload)
         case (.ed25519, _),
@@ -156,7 +163,6 @@ extension NIOSSHPublicKey {
             (.ecdsaP384, _),
             (.ecdsaP521, _),
             (.custom, _):
-            // We cannot verify with a key of a custom kind.
             return false
         }
     }
@@ -315,11 +321,30 @@ extension ByteBuffer {
         }
     }
 
-    mutating func readSSHHostKey() throws -> NIOSSHPublicKey? {
+    /// Reads an SSH host key from this `ByteBuffer`.
+    ///
+    /// - parameters:
+    ///     - customKeyTypes: The types of key of a custom kind that may be read. If any are given, this buffer
+    ///         must hold a single key and nothing else.
+    mutating func readSSHHostKey(
+        customKeyTypes: [any NIOSSHVerifyingPublicKeyProtocol.Type] = []
+    ) throws -> NIOSSHPublicKey? {
         try self.rewindOnNilOrError { buffer in
             // The wire format always begins with an SSH string containing the key format identifier. Let's grab that.
             guard let keyIdentifierBytes = buffer.readSSHString() else {
                 return nil
+            }
+
+            // The built-in key formats always take precedence.
+            let keyIdentifier = keyIdentifierBytes.readableBytesView
+            if !NIOSSHPublicKey.knownAlgorithms.contains(where: { $0.elementsEqual(keyIdentifier) }),
+                let customType = customKeyTypes.first(where: { $0.publicKeyPrefix.utf8.elementsEqual(keyIdentifier) })
+            {
+                let key = try customType.read(from: &buffer)
+                guard buffer.readableBytes == 0 else {
+                    throw NIOSSHError.invalidSSHMessage(reason: "trailing bytes in \(customType.publicKeyPrefix) key")
+                }
+                return NIOSSHPublicKey(backingKey: .custom(key))
             }
 
             // Now we need to check if they match our supported key algorithms.

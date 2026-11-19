@@ -47,6 +47,16 @@ public enum SSHConnectionRole {
         }
     }
 
+    /// The types of host key of a custom kind that the peer may present. Only clients are presented with host keys.
+    internal var customHostKeyTypes: [any NIOSSHVerifyingPublicKeyProtocol.Type] {
+        switch self {
+        case .client(let configuration):
+            return configuration.customHostKeyTypes
+        case .server:
+            return []
+        }
+    }
+
     /// The maximum size of a channel data payload this peer advertises it is willing to receive,
     /// and against which inbound encrypted packets are bounded.
     internal var maximumPacketSize: UInt32 {

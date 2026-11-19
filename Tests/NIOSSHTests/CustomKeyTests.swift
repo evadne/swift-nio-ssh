@@ -31,11 +31,13 @@ struct TestCustomPublicKey: NIOSSHPublicKeyProtocol {
 
 /// The private half of ``TestCustomPublicKey``, which signs under a name that is not the name of its key format.
 struct TestCustomPrivateKey: NIOSSHPrivateKeyProtocol {
-    static let signatureAlgorithm = "test-p256-sha256@example.com"
+    static let sha256Algorithm = "test-p256-sha256@example.com"
+
+    static let sha512Algorithm = "test-p256-sha512@example.com"
 
     var key = P256.Signing.PrivateKey()
 
-    var signatureAlgorithm: String { Self.signatureAlgorithm }
+    var signatureAlgorithm: String = TestCustomPrivateKey.sha256Algorithm
 
     var publicKey: any NIOSSHPublicKeyProtocol {
         TestCustomPublicKey(key: self.key.publicKey)
@@ -43,7 +45,11 @@ struct TestCustomPrivateKey: NIOSSHPrivateKeyProtocol {
 
     func signature<D: DataProtocol>(for data: D) throws -> ByteBuffer {
         var buffer = ByteBuffer()
-        buffer.writeSSHString(try self.key.signature(for: data).rawRepresentation)
+        if self.signatureAlgorithm == Self.sha512Algorithm {
+            buffer.writeSSHString(try self.key.signature(for: SHA512.hash(data: data)).rawRepresentation)
+        } else {
+            buffer.writeSSHString(try self.key.signature(for: SHA256.hash(data: data)).rawRepresentation)
+        }
         return buffer
     }
 }
@@ -173,21 +179,35 @@ final class CustomKeyTests: XCTestCase {
         }
     }
 
-    func testCustomPublicKeysVerifyNothing() throws {
-        let customKey = TestCustomPrivateKey()
-        let privateKey = NIOSSHPrivateKey(custom: customKey)
-        let payload = UserAuthSignablePayload(
-            sessionIdentifier: ByteBuffer(repeating: 0xAB, count: 32),
-            userName: "foo",
-            serviceName: "ssh-connection",
-            publicKey: privateKey.publicKey,
-            signatureAlgorithm: privateKey.customSignatureAlgorithm
-        )
+    func testCustomPublicKeysVerifyOnlyWhatTheirKeySigned() throws {
+        let privateKey = NIOSSHPrivateKey(custom: TestCustomPrivateKey())
+        let otherKey = NIOSSHPrivateKey(custom: TestCustomPrivateKey())
+
+        func makePayload(userName: String) -> UserAuthSignablePayload {
+            UserAuthSignablePayload(
+                sessionIdentifier: ByteBuffer(repeating: 0xAB, count: 32),
+                userName: userName,
+                serviceName: "ssh-connection",
+                publicKey: privateKey.publicKey,
+                signatureAlgorithm: privateKey.customSignatureAlgorithm
+            )
+        }
+
+        let payload = makePayload(userName: "foo")
         let signature = try privateKey.sign(payload)
 
-        XCTAssertFalse(privateKey.publicKey.isValidSignature(signature, for: payload))
-        XCTAssertFalse(privateKey.publicKey.isValidSignature(signature, for: payload.bytes))
-        XCTAssertFalse(privateKey.publicKey.isValidSignature(signature, for: SHA256.hash(data: [1, 2, 3])))
+        XCTAssertTrue(privateKey.publicKey.isValidSignature(signature, for: payload))
+        XCTAssertTrue(privateKey.publicKey.isValidSignature(signature, for: payload.bytes))
+        XCTAssertFalse(privateKey.publicKey.isValidSignature(signature, for: makePayload(userName: "bar")))
+        XCTAssertFalse(otherKey.publicKey.isValidSignature(signature, for: payload))
+
+        // A signature by a built-in key is of another kind altogether.
+        let builtInSignature = try NIOSSHPrivateKey(p256Key: .init()).sign(payload)
+        XCTAssertFalse(privateKey.publicKey.isValidSignature(builtInSignature, for: payload))
+
+        let digest = SHA256.hash(data: [1, 2, 3])
+        XCTAssertTrue(privateKey.publicKey.isValidSignature(try privateKey.sign(digest: digest), for: digest))
+        XCTAssertFalse(otherKey.publicKey.isValidSignature(try privateKey.sign(digest: digest), for: digest))
     }
 
     func testServersTreatCustomKeysAsUnknown() throws {

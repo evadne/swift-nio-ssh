@@ -288,12 +288,25 @@ struct SSHKeyExchangeStateMachine {
         switch self.state {
         case .keyExchangeInitSent(exchange: var exchanger, let negotiated):
             switch self.role {
-            case .client:
-                guard message.hostKey.keyPrefix.elementsEqual(negotiated.negotiatedHostKeyAlgorithm.utf8) else {
+            case .client(let configuration):
+                // A key of a custom kind is negotiated by the name of the algorithm it signs with, which is not
+                // necessarily the name of its key format: an "ssh-rsa" key is negotiated as "rsa-sha2-512".
+                let negotiatedAlgorithm = String(negotiated.negotiatedHostKeyAlgorithm)
+                let customHostKeyType = configuration.customHostKeyTypes.first {
+                    $0.signatureAlgorithms.contains(negotiatedAlgorithm)
+                }
+                let expectedKeyPrefix = customHostKeyType?.publicKeyPrefix ?? negotiatedAlgorithm
+
+                guard message.hostKey.keyPrefix.elementsEqual(expectedKeyPrefix.utf8) else {
                     throw NIOSSHError.invalidHostKeyForKeyExchange(
                         expected: negotiated.negotiatedHostKeyAlgorithm,
                         got: message.hostKey.keyPrefix
                     )
+                }
+
+                // Such a key can sign with several algorithms, so we must hold the server to the one we negotiated.
+                if customHostKeyType != nil, message.signature.customAlgorithm != negotiatedAlgorithm {
+                    throw NIOSSHError.invalidExchangeHashSignature
                 }
 
                 let result = try exchanger.receiveServerKeyExchangePayload(
@@ -564,8 +577,10 @@ struct SSHKeyExchangeStateMachine {
             if configuration.advertiseHostCertificateAlgorithms {
                 // A host that has a certificate should present it, so the certificate algorithms come first.
                 return Self.supportedServerHostCertificateAlgorithms + Self.supportedServerHostKeyAlgorithms
+                    + configuration.customHostKeyTypes.signatureAlgorithms.map { Substring($0) }
             }
             return Self.supportedServerHostKeyAlgorithms
+                + configuration.customHostKeyTypes.signatureAlgorithms.map { Substring($0) }
         case .server(let configuration):
             return configuration.hostKeys.flatMap { $0.hostKeyAlgorithms }
         }

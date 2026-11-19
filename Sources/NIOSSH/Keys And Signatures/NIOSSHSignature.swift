@@ -239,7 +239,12 @@ extension ByteBuffer {
         return writtenLength
     }
 
-    mutating func readSSHSignature() throws -> NIOSSHSignature? {
+    /// Reads an SSH signature from this `ByteBuffer`.
+    ///
+    /// - parameters:
+    ///     - customAlgorithms: The names of the algorithms of keys of a custom kind whose signatures may be read.
+    ///         If any are given, this buffer must hold a single signature and nothing else.
+    mutating func readSSHSignature(customAlgorithms: [String] = []) throws -> NIOSSHSignature? {
         try self.rewindOnNilOrError { buffer in
             // The wire format always begins with an SSH string containing the signature format identifier. Let's grab that.
             guard var signatureIdentifierBytes = buffer.readSSHString() else {
@@ -256,6 +261,10 @@ extension ByteBuffer {
                 return try buffer.readECDSAP384Signature()
             } else if bytesView.elementsEqual(NIOSSHSignature.ecdsaP521SignaturePrefix) {
                 return try buffer.readECDSAP521Signature()
+            } else if let algorithm = customAlgorithms.first(where: { $0.utf8.elementsEqual(bytesView) }) {
+                // The rest of the signature is in a format only the key knows.
+                let blob = buffer.readSlice(length: buffer.readableBytes)!
+                return NIOSSHSignature(backingSignature: .custom(algorithm: algorithm, blob: blob))
             } else {
                 // We don't know this signature type.
                 let signature =

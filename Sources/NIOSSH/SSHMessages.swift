@@ -365,7 +365,12 @@ extension ByteBuffer {
     ///
     /// This function will consume as many bytes as the message should require. If it cannot read enough bytes,
     /// it will return nil.
-    mutating func readSSHMessage() throws -> SSHMessage? {
+    ///
+    /// - parameters:
+    ///     - customHostKeyTypes: The types of host key of a custom kind that the peer may present.
+    mutating func readSSHMessage(
+        customHostKeyTypes: [any NIOSSHVerifyingPublicKeyProtocol.Type] = []
+    ) throws -> SSHMessage? {
         try self.rewindOnNilOrError { `self` in
             guard let type = self.readInteger(as: UInt8.self) else {
                 return nil
@@ -413,7 +418,8 @@ extension ByteBuffer {
                 }
                 return .keyExchangeInit(message)
             case SSHMessage.KeyExchangeECDHReplyMessage.id:
-                guard let message = try self.readKeyExchangeECDHReplyMessage() else {
+                guard let message = try self.readKeyExchangeECDHReplyMessage(customHostKeyTypes: customHostKeyTypes)
+                else {
                     return nil
                 }
                 return .keyExchangeReply(message)
@@ -630,14 +636,18 @@ extension ByteBuffer {
         }
     }
 
-    mutating func readKeyExchangeECDHReplyMessage() throws -> SSHMessage.KeyExchangeECDHReplyMessage? {
+    mutating func readKeyExchangeECDHReplyMessage(
+        customHostKeyTypes: [any NIOSSHVerifyingPublicKeyProtocol.Type] = []
+    ) throws -> SSHMessage.KeyExchangeECDHReplyMessage? {
         try self.rewindOnNilOrError { `self` in
             guard
                 var hostKeyBytes = self.readSSHString(),
-                let hostKey = try hostKeyBytes.readSSHHostKey(),
+                let hostKey = try hostKeyBytes.readSSHHostKey(customKeyTypes: customHostKeyTypes),
                 let publicKey = self.readSSHString(),
                 var signatureBytes = self.readSSHString(),
-                let signature = try signatureBytes.readSSHSignature()
+                let signature = try signatureBytes.readSSHSignature(
+                    customAlgorithms: customHostKeyTypes.signatureAlgorithms
+                )
             else {
                 return nil
             }

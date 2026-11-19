@@ -46,6 +46,9 @@ struct SSHPacketParser {
     /// for the SSH framing and padding (RFC 4253 §6) that wraps a maximum-size channel data payload.
     private let maximumEncryptedPacketLength: UInt32
 
+    /// The types of host key of a custom kind that the peer may present.
+    private let customHostKeyTypes: [any NIOSSHVerifyingPublicKeyProtocol.Type]
+
     /// The number of preamble lines a client has discarded while waiting for the identification
     /// string, bounded by `maximumPreambleLineCount`.
     private var preambleLineCount: Int
@@ -58,7 +61,8 @@ struct SSHPacketParser {
     init(
         isServer: Bool,
         allocator: ByteBufferAllocator,
-        maximumPacketSize: UInt32 = UInt32(Constants.defaultMaximumChannelPacketSize)
+        maximumPacketSize: UInt32 = UInt32(Constants.defaultMaximumChannelPacketSize),
+        customHostKeyTypes: [any NIOSSHVerifyingPublicKeyProtocol.Type] = []
     ) {
         precondition(
             maximumPacketSize >= Constants.minimumChannelPacketSize,
@@ -75,6 +79,7 @@ struct SSHPacketParser {
         // Add headroom for the SSH framing and padding (RFC 4253 §6).
         self.maximumEncryptedPacketLength = maximumPacketSize + 1024
         self.preambleLineCount = 0
+        self.customHostKeyTypes = customHostKeyTypes
     }
 
     mutating func append(bytes: inout ByteBuffer) {
@@ -330,7 +335,8 @@ struct SSHPacketParser {
             buffer.moveReaderIndex(forwardBy: MemoryLayout<UInt32>.size)
 
             var content = try buffer.sliceContentFromPadding()
-            guard let message = try content.readSSHMessage(), content.readableBytes == 0, buffer.readableBytes == 0
+            guard let message = try content.readSSHMessage(customHostKeyTypes: self.customHostKeyTypes),
+                content.readableBytes == 0, buffer.readableBytes == 0
             else {
                 // Throw this error if the content wasn't exactly the right length for the message.
                 throw NIOSSHError.invalidPacketFormat
@@ -347,7 +353,8 @@ struct SSHPacketParser {
             }
 
             var content = try protection.decryptAndVerifyRemainingPacket(&buffer, sequenceNumber: self.sequenceNumber)
-            guard let message = try content.readSSHMessage(), content.readableBytes == 0, buffer.readableBytes == 0
+            guard let message = try content.readSSHMessage(customHostKeyTypes: self.customHostKeyTypes),
+                content.readableBytes == 0, buffer.readableBytes == 0
             else {
                 // Throw this error if the content wasn't exactly the right length for the message.
                 throw NIOSSHError.invalidPacketFormat
