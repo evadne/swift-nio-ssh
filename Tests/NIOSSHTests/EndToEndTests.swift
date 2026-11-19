@@ -965,6 +965,78 @@ class EndToEndTests: XCTestCase {
         XCTAssertNoThrow(try XCTUnwrap(childResult.value).get())
     }
 
+    func testChannelConfirmedWithZeroMaximumPacketSizeFails() throws {
+        // The peers protect nothing, so that this test can play the server once the client has authenticated.
+        XCTAssertNoThrow(try self.channel.configureWithHarness(.scriptable()))
+        XCTAssertNoThrow(try self.channel.activate())
+        XCTAssertNoThrow(try self.channel.interactInMemory())
+
+        let errorLogger = ErrorLoggingHandler()
+        var childChannel: Channel?
+        let childResult = NIOLoopBoundBox<Result<Channel, Error>?>(nil, eventLoop: self.channel.client.eventLoop)
+        let childPromise = self.channel.client.eventLoop.makePromise(of: Channel.self)
+        childPromise.futureResult.whenComplete { childResult.value = $0 }
+        self.channel.clientSSHHandler?.createChannel(childPromise, channelType: .session) { channel, _ in
+            childChannel = channel
+            return channel.eventLoop.makeCompletedFuture {
+                try channel.pipeline.syncOperations.addHandler(errorLogger)
+            }
+        }
+
+        guard case .some(.channelOpen(let request)) = try self.channel.messagesForScriptedServer().first else {
+            return XCTFail("Expected the client to request a channel")
+        }
+        guard let channel = childChannel else {
+            return XCTFail("Did not create child channel")
+        }
+
+        // The server confirms the channel, and will accept no data at all in a message. That is an error on the
+        // channel, and not on the connection.
+        XCTAssertNoThrow(
+            try self.channel.sendFromScriptedServer(
+                .channelOpenConfirmation(
+                    .init(
+                        recipientChannel: request.senderChannel,
+                        senderChannel: 1,
+                        initialWindowSize: 1 << 24,
+                        maximumPacketSize: 0
+                    )
+                )
+            )
+        )
+
+        // The channel must not have been activated. We stop here if it was: we could never finish splitting a
+        // write into messages that hold none of it.
+        guard !channel.isActive else {
+            return XCTFail("Channel is active, and its peer accepts no data")
+        }
+
+        XCTAssertEqual(errorLogger.errors.count, 1)
+        XCTAssertEqual((errorLogger.errors.first as? NIOSSHError)?.type, .protocolViolation)
+        XCTAssertThrowsError(try XCTUnwrap(childResult.value).get()) { error in
+            XCTAssertEqual((error as? NIOSSHError)?.type, .protocolViolation)
+        }
+        XCTAssertEqual(try self.channel.messagesForScriptedServer(), [.channelClose(.init(recipientChannel: 1))])
+
+        // A write fails, and the server closes its side of the channel.
+        let writePromise = self.channel.client.eventLoop.makePromise(of: Void.self)
+        channel.pipeline.syncOperations.writeAndFlush(
+            NIOAny(SSHChannelData(type: .channel, data: .byteBuffer(ByteBuffer(string: "hello")))),
+            promise: writePromise
+        )
+        XCTAssertThrowsError(try writePromise.futureResult.wait())
+        XCTAssertNoThrow(
+            try self.channel.sendFromScriptedServer(.channelClose(.init(recipientChannel: request.senderChannel)))
+        )
+        XCTAssertEqual(try self.channel.messagesForScriptedServer(), [])
+
+        // The connection is as good as it was: the client can ask for another channel.
+        self.channel.clientSSHHandler?.createChannel(nil, channelType: .session, nil)
+        guard case .some(.channelOpen) = try self.channel.messagesForScriptedServer().first else {
+            return XCTFail("Expected the client to request another channel")
+        }
+    }
+
     func testChildChannelCreatedWhileParentUnwritableBecomesWritable() throws {
         XCTAssertNoThrow(try self.channel.configureWithHarness(TestHarness()))
         XCTAssertNoThrow(try self.channel.activate())

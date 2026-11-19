@@ -1816,6 +1816,209 @@ final class ChildChannelMultiplexerTests: XCTestCase {
         )
     }
 
+    func testWeRejectZeroMaxMessageSizeInOpenConfirmation() throws {
+        // The window makes no difference to this: a peer that opens it later is no more able to take our data.
+        for initialWindowSize in [UInt32(1 << 24), 0] {
+            let harness = self.harnessForbiddingInboundChannels()
+            defer {
+                harness.finish()
+            }
+
+            let errorLogger = ErrorLoggingHandler()
+            var childChannel: Channel?
+            let childResult = NIOLoopBoundBox<Result<Channel, Error>?>(nil, eventLoop: harness.eventLoop)
+            let childPromise: EventLoopPromise<Channel> = harness.eventLoop.makePromise()
+            childPromise.futureResult.whenComplete { childResult.value = $0 }
+            harness.multiplexer.createChildChannel(childPromise, channelType: .session) { channel, _ in
+                childChannel = channel
+                return channel.eventLoop.makeCompletedFuture {
+                    try channel.pipeline.syncOperations.addHandler(errorLogger)
+                }
+            }
+
+            guard let channel = childChannel else {
+                XCTFail("Did not create child channel")
+                return
+            }
+
+            // The peer confirms the channel, and will accept no data at all in a message.
+            let channelID = self.assertChannelOpen(harness.flushedMessages.first)
+            XCTAssertNoThrow(
+                try harness.multiplexer.receiveMessage(
+                    self.openConfirmation(
+                        originalChannelID: channelID!,
+                        peerChannelID: 1,
+                        initialWindowSize: initialWindowSize,
+                        maxPacketSize: 0
+                    )
+                )
+            )
+
+            // The channel must not have been activated. We stop here if it was: we could never finish splitting
+            // a write into messages that hold none of it.
+            guard !channel.isActive else {
+                XCTFail("Channel is active, and its peer accepts no data")
+                return
+            }
+
+            // The channel failed instead, and we told the peer to close it.
+            XCTAssertEqual(errorLogger.errors.count, 1)
+            XCTAssertEqual((errorLogger.errors.first as? NIOSSHError)?.type, .protocolViolation)
+            XCTAssertThrowsError(try XCTUnwrap(childResult.value).get()) { error in
+                XCTAssertEqual((error as? NIOSSHError)?.type, .protocolViolation)
+            }
+            XCTAssertEqual(harness.flushedMessages.count, 2)
+            self.assertChannelClose(harness.flushedMessages.last, recipientChannel: 1)
+
+            // A write fails. The peer can do nothing more to the channel, whose close we wait for.
+            harness.eventLoop.run()
+            let writePromise = harness.eventLoop.makePromise(of: Void.self)
+            channel.pipeline.syncOperations.writeAndFlush(
+                NIOAny(SSHChannelData(type: .channel, data: .byteBuffer(ByteBuffer(string: "hello")))),
+                promise: writePromise
+            )
+            XCTAssertThrowsError(try writePromise.futureResult.wait())
+            XCTAssertNoThrow(
+                try harness.multiplexer.receiveMessage(self.windowAdjust(peerChannelID: channelID!, increment: 1))
+            )
+            XCTAssertNoThrow(try harness.multiplexer.receiveMessage(self.close(peerChannelID: channelID!)))
+            XCTAssertEqual(harness.flushedMessages.count, 2)
+        }
+    }
+
+    func testWeRejectZeroMaxMessageSizeInOpenRequest() throws {
+        // The initializer never hears of a channel that we could not write to.
+        let harness = self.harnessForbiddingInboundChannels()
+        defer {
+            harness.finish()
+        }
+
+        XCTAssertNoThrow(try harness.multiplexer.receiveMessage(self.openRequest(channelID: 1, maxPacketSize: 0)))
+        XCTAssertEqual(harness.flushedMessages.count, 1)
+        self.assertChannelOpenFailure(harness.flushedMessages.first, recipientChannel: 1)
+
+        // The channel is gone, so the peer has nothing to adjust the window of.
+        harness.eventLoop.run()
+        XCTAssertThrowsError(
+            try harness.multiplexer.receiveMessage(self.windowAdjust(peerChannelID: 0, increment: 1))
+        ) { error in
+            XCTAssertEqual((error as? NIOSSHError)?.type, .protocolViolation)
+        }
+        XCTAssertEqual(harness.flushedMessages.count, 1)
+    }
+
+    func testRespectingMaxMessageSizeOfOne() throws {
+        // RFC 4254 sets no minimum, and suggests small packets for interactive use. This is the smallest we can
+        // work with, and so we do.
+        let harness = self.harnessForbiddingInboundChannels()
+        defer {
+            harness.finish()
+        }
+
+        var childChannel: Channel?
+        harness.multiplexer.createChildChannel(channelType: .session) { channel, _ in
+            childChannel = channel
+            return channel.eventLoop.makeSucceededFuture(())
+        }
+
+        guard let channel = childChannel else {
+            XCTFail("Did not create child channel")
+            return
+        }
+
+        let channelID = self.assertChannelOpen(harness.flushedMessages.first)
+        XCTAssertNoThrow(
+            try harness.multiplexer.receiveMessage(
+                self.openConfirmation(originalChannelID: channelID!, peerChannelID: 1, maxPacketSize: 1)
+            )
+        )
+        XCTAssertTrue(channel.isActive)
+        XCTAssertTrue(channel.isWritable)
+
+        // Three bytes are three messages.
+        var buffer = channel.allocator.buffer(capacity: 3)
+        buffer.writeBytes(0..<3)
+        let writePromise = harness.eventLoop.makePromise(of: Void.self)
+        channel.pipeline.syncOperations.writeAndFlush(
+            NIOAny(SSHChannelData(type: .channel, data: .byteBuffer(buffer))),
+            promise: writePromise
+        )
+        XCTAssertEqual(harness.flushedMessages.count, 4)
+        for index in 0..<3 {
+            self.assertChannelData(
+                harness.flushedMessage(1 + index),
+                data: buffer.getSlice(at: buffer.readerIndex + index, length: 1)!,
+                recipientChannel: 1
+            )
+        }
+        XCTAssertNoThrow(try writePromise.futureResult.wait())
+    }
+
+    func testWritesWaitForWindowThatIsInitiallyEmpty() throws {
+        let harness = self.harnessForbiddingInboundChannels()
+        defer {
+            harness.finish()
+        }
+
+        var childChannel: Channel?
+        harness.multiplexer.createChildChannel(channelType: .session) { channel, _ in
+            childChannel = channel
+            return channel.eventLoop.makeSucceededFuture(())
+        }
+
+        guard let channel = childChannel else {
+            XCTFail("Did not create child channel")
+            return
+        }
+
+        // The peer may open the channel with no window at all. The channel is active, but not writable.
+        let channelID = self.assertChannelOpen(harness.flushedMessages.first)
+        XCTAssertNoThrow(
+            try harness.multiplexer.receiveMessage(
+                self.openConfirmation(originalChannelID: channelID!, peerChannelID: 1, initialWindowSize: 0)
+            )
+        )
+        XCTAssertTrue(channel.isActive)
+        XCTAssertFalse(channel.isWritable)
+
+        // A write waits for as long as the peer leaves the window empty.
+        var buffer = channel.allocator.buffer(capacity: 3)
+        buffer.writeBytes(0..<3)
+        channel.pipeline.syncOperations.writeAndFlush(
+            NIOAny(SSHChannelData(type: .channel, data: .byteBuffer(buffer))),
+            promise: nil
+        )
+        harness.multiplexer.parentChannelReadComplete()
+        XCTAssertFalse(channel.isWritable)
+        XCTAssertEqual(harness.flushedMessages.count, 1)
+
+        // Once the peer opens the window, as much of the write as fits is sent.
+        XCTAssertNoThrow(
+            try harness.multiplexer.receiveMessage(self.windowAdjust(peerChannelID: channelID!, increment: 2))
+        )
+        harness.multiplexer.parentChannelReadComplete()
+        XCTAssertFalse(channel.isWritable)
+        XCTAssertEqual(harness.flushedMessages.count, 2)
+        self.assertChannelData(
+            harness.flushedMessage(1),
+            data: buffer.getSlice(at: buffer.readerIndex, length: 2)!,
+            recipientChannel: 1
+        )
+
+        // And then the rest.
+        XCTAssertNoThrow(
+            try harness.multiplexer.receiveMessage(self.windowAdjust(peerChannelID: channelID!, increment: 2))
+        )
+        harness.multiplexer.parentChannelReadComplete()
+        XCTAssertTrue(channel.isWritable)
+        XCTAssertEqual(harness.flushedMessages.count, 3)
+        self.assertChannelData(
+            harness.flushedMessage(2),
+            data: buffer.getSlice(at: buffer.readerIndex + 2, length: 1)!,
+            recipientChannel: 1
+        )
+    }
+
     func testPromiseCompletionDelaysUntilResponse() {
         let harness = self.harnessForbiddingInboundChannels()
         defer {

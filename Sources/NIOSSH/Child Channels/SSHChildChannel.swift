@@ -784,6 +784,21 @@ extension SSHChildChannel {
     private func handleInboundChannelOpen(_ message: SSHMessage.ChannelOpenMessage) throws {
         self.state.receiveChannelOpen(message)
 
+        guard message.maximumPacketSize > 0 else {
+            // The peer will not accept even one byte of data in a message, so nothing written to this channel
+            // could ever be sent. We refuse to open it, in the same way as when the initializer fails, and we
+            // don't trouble the initializer with it.
+            let failure = SSHMessage.ChannelOpenFailureMessage(
+                recipientChannel: message.senderChannel,
+                reasonCode: 2,
+                description: "",
+                language: "en-US"
+            )
+            self.processOutboundMessage(.channelOpenFailure(failure), promise: nil)
+            self.writePendingToMultiplexer()
+            return
+        }
+
         // Window size starts at zero, so we treat this as an increment. However, we disregard whether this changed
         // the writability value, as we lie about writability until we're active anyway.
         _ = try self.writabilityManager.outboundWindowIncremented(message.initialWindowSize)
@@ -796,6 +811,16 @@ extension SSHChildChannel {
 
     private func handleInboundChannelOpenConfirmation(_ message: SSHMessage.ChannelOpenConfirmationMessage) throws {
         try self.state.receiveChannelOpenConfirmation(message)
+
+        guard message.maximumPacketSize > 0 else {
+            // The peer will not accept even one byte of data in a message, so nothing written to this channel
+            // could ever be sent. The peer has told us its channel ID, so this is an error on the channel: we
+            // never activate it, and we tell the peer to close it.
+            throw NIOSSHError.protocolViolation(
+                protocolName: "channel",
+                violation: "Peer set maximum packet size to zero"
+            )
+        }
 
         // Window size starts at zero, so we treat this as an increment. However, we disregard whether this changed
         // the writability value, as we lie about writability until we're active anyway.
