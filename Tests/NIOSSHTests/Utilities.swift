@@ -14,6 +14,7 @@
 
 import Crypto
 import NIOCore
+import NIOEmbedded
 import XCTest
 
 @testable import NIOSSH
@@ -256,5 +257,107 @@ class TestTransportProtection: NIOSSHTransportProtection {
         destination.setBytes(ciphertext.readableBytesView, at: packetLengthIndex)
         let tagLength = destination.writeBytes(hmac.finalize())
         precondition(tagLength == self.macBytes, "Unexpected short tag")
+    }
+}
+
+/// A transport protection scheme that protects nothing.
+///
+/// With this scheme negotiated, a test can play one side of a connection by hand after key exchange: it can
+/// write packets for a ``NIOSSHHandler`` to read, and it can read the packets that the handler writes.
+final class PlaintextTransportProtection: NIOSSHTransportProtection {
+    static var cipherBlockSize: Int { 8 }
+
+    static var cipherName: String { "plaintext@test.example.com" }
+
+    static var macName: String? { nil }
+
+    static var keySizes: ExpectedKeySizes {
+        .init(ivSize: 12, encryptionKeySize: 16, macKeySize: 16)
+    }
+
+    var macBytes: Int { 0 }
+
+    var lengthEncrypted: Bool { true }
+
+    init(initialKeys: NIOSSHSessionKeys) {}
+
+    func updateKeys(_ newKeys: NIOSSHSessionKeys) throws {}
+
+    func decryptFirstBlock(_ source: inout ByteBuffer) throws {}
+
+    func decryptAndVerifyRemainingPacket(_ source: inout ByteBuffer, sequenceNumber: UInt32) throws -> ByteBuffer {
+        guard let content = source.readPlaintextPacketContent() else {
+            throw NIOSSHError.invalidEncryptedPacketLength
+        }
+        return content
+    }
+
+    func encryptPacket(_ destination: inout ByteBuffer, sequenceNumber: UInt32) throws {}
+}
+
+extension ByteBuffer {
+    /// Reads one packet that ``PlaintextTransportProtection`` or no protection at all was applied to, and returns
+    /// its content.
+    fileprivate mutating func readPlaintextPacketContent() -> ByteBuffer? {
+        guard let length = self.readInteger(as: UInt32.self), var packet = self.readSlice(length: Int(length)),
+            let paddingLength = packet.readInteger(as: UInt8.self)
+        else {
+            return nil
+        }
+        return packet.readSlice(length: packet.readableBytes - Int(paddingLength))
+    }
+
+    /// Reads every packet in this buffer as ``readPlaintextPacketContent()`` does, and parses the messages.
+    mutating func readPlaintextSSHMessages(expectingUserAuthInfoRequest: Bool = false) throws -> [SSHMessage] {
+        var messages: [SSHMessage] = []
+        while var content = self.readPlaintextPacketContent() {
+            guard let message = try content.readSSHMessage(expectingUserAuthInfoRequest: expectingUserAuthInfoRequest)
+            else {
+                throw NIOSSHError.invalidPacketFormat
+            }
+            messages.append(message)
+        }
+        return messages
+    }
+
+    /// A packet holding `message`, as ``PlaintextTransportProtection`` would send it.
+    static func plaintextSSHPacket(_ message: SSHMessage) -> ByteBuffer {
+        var buffer = ByteBuffer()
+        buffer.writeSSHPacket(message: message, lengthEncrypted: true, blockSize: 8)
+        return buffer
+    }
+}
+
+extension BackToBackEmbeddedChannel {
+    /// Has the client read `message` as though the server had sent it. Both peers must have negotiated
+    /// ``PlaintextTransportProtection``.
+    func sendFromScriptedServer(_ message: SSHMessage) throws {
+        try self.client.writeInbound(ByteBuffer.plaintextSSHPacket(message))
+        self.run()
+    }
+
+    /// The messages the client has written and that have not been passed to the server, which never sees them.
+    func messagesForScriptedServer(expectingUserAuthInfoRequest: Bool = false) throws -> [SSHMessage] {
+        self.run()
+
+        var messages: [SSHMessage] = []
+        while var bytes = try self.client.readOutbound(as: ByteBuffer.self) {
+            messages.append(
+                contentsOf: try bytes.readPlaintextSSHMessages(
+                    expectingUserAuthInfoRequest: expectingUserAuthInfoRequest
+                )
+            )
+        }
+        return messages
+    }
+}
+
+extension TestHarness {
+    /// A harness whose peers protect nothing, so that a test can play the server by hand once it has to.
+    static func scriptable() -> TestHarness {
+        var harness = TestHarness()
+        harness.configureClient = { $0.transportProtectionSchemes = [PlaintextTransportProtection.self] }
+        harness.configureServer = { $0.transportProtectionSchemes = [PlaintextTransportProtection.self] }
+        return harness
     }
 }

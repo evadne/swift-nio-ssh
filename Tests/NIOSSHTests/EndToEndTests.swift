@@ -94,15 +94,16 @@ class BackToBackEmbeddedChannel {
             allocator: self.client.allocator,
             inboundChildChannelInitializer: nil
         )
+        var serverConfiguration = SSHServerConfiguration(
+            hostKeys: harness.serverHostKeys,
+            userAuthDelegate: harness.serverAuthDelegate,
+            globalRequestDelegate: harness.serverGlobalRequestDelegate,
+            banner: harness.serverAuthBanner
+        )
+        harness.configureServer(&serverConfiguration)
+
         let serverHandler = NIOSSHHandler(
-            role: .server(
-                .init(
-                    hostKeys: harness.serverHostKeys,
-                    userAuthDelegate: harness.serverAuthDelegate,
-                    globalRequestDelegate: harness.serverGlobalRequestDelegate,
-                    banner: harness.serverAuthBanner
-                )
-            ),
+            role: .server(serverConfiguration),
             allocator: self.server.allocator
         ) { channel, _ in
             self.activeServerChannels.append(channel)
@@ -156,6 +157,8 @@ struct TestHarness {
     var serverAuthBanner: SSHServerConfiguration.UserAuthBanner?
 
     var configureClient: (inout SSHClientConfiguration) -> Void = { _ in }
+
+    var configureServer: (inout SSHServerConfiguration) -> Void = { _ in }
 }
 
 final class UserEventExpecter: ChannelInboundHandler {

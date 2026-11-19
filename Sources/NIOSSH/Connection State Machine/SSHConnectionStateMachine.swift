@@ -309,7 +309,12 @@ struct SSHConnectionStateMachine {
 
             case .userAuthentication(var state):
                 do {
-                    // In this state we tolerate receiving user auth messages.
+                    // In this state we tolerate receiving user auth messages. One of them has a number whose
+                    // meaning depends on the authentication method in progress, so we tell the parser which
+                    // it is before each message.
+                    state.parser.expectingUserAuthInfoRequest =
+                        state.userAuthStateMachine.expectingUserAuthInfoRequest
+
                     guard let message = try state.parser.nextPacket() else {
                         self = .userAuthentication(state)
                         return nil
@@ -334,6 +339,7 @@ struct SSHConnectionStateMachine {
                     case .userAuthSuccess:
                         let result = try state.receiveUserAuthSuccess()
                         // Hey, auth succeeded!
+                        state.parser.expectingUserAuthInfoRequest = false
                         self = .active(ActiveState(state))
                         return result
 
@@ -344,6 +350,11 @@ struct SSHConnectionStateMachine {
 
                     case .userAuthBanner(let message):
                         let result = try state.receiveUserAuthBanner(message)
+                        self = .userAuthentication(state)
+                        return result
+
+                    case .userAuthInfoRequest(let message):
+                        let result = try state.receiveUserAuthInfoRequest(message)
                         self = .userAuthentication(state)
                         return result
 
@@ -973,6 +984,10 @@ struct SSHConnectionStateMachine {
 
             case .userAuthPKOK(let message):
                 try state.writeUserAuthPKOK(message, into: &buffer)
+                self.state = .userAuthentication(state)
+
+            case .userAuthInfoResponse(let message):
+                try state.writeUserAuthInfoResponse(message, into: &buffer)
                 self.state = .userAuthentication(state)
 
             case .disconnect:

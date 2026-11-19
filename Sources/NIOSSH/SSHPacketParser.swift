@@ -49,6 +49,11 @@ struct SSHPacketParser {
     /// The types of host key of a custom kind that the peer may present.
     private let customHostKeyTypes: [any NIOSSHVerifyingPublicKeyProtocol.Type]
 
+    /// Whether message number 60 is to be read as `SSH_MSG_USERAUTH_INFO_REQUEST` and not as
+    /// `SSH_MSG_USERAUTH_PK_OK`. The two share a number, and which one the peer means depends on the
+    /// authentication method in progress, so this is set by the connection state machine.
+    var expectingUserAuthInfoRequest: Bool = false
+
     /// The number of preamble lines a client has discarded while waiting for the identification
     /// string, bounded by `maximumPreambleLineCount`.
     private var preambleLineCount: Int
@@ -335,7 +340,11 @@ struct SSHPacketParser {
             buffer.moveReaderIndex(forwardBy: MemoryLayout<UInt32>.size)
 
             var content = try buffer.sliceContentFromPadding()
-            guard let message = try content.readSSHMessage(customHostKeyTypes: self.customHostKeyTypes),
+            guard
+                let message = try content.readSSHMessage(
+                    customHostKeyTypes: self.customHostKeyTypes,
+                    expectingUserAuthInfoRequest: self.expectingUserAuthInfoRequest
+                ),
                 content.readableBytes == 0, buffer.readableBytes == 0
             else {
                 // Throw this error if the content wasn't exactly the right length for the message.
@@ -353,7 +362,11 @@ struct SSHPacketParser {
             }
 
             var content = try protection.decryptAndVerifyRemainingPacket(&buffer, sequenceNumber: self.sequenceNumber)
-            guard let message = try content.readSSHMessage(customHostKeyTypes: self.customHostKeyTypes),
+            guard
+                let message = try content.readSSHMessage(
+                    customHostKeyTypes: self.customHostKeyTypes,
+                    expectingUserAuthInfoRequest: self.expectingUserAuthInfoRequest
+                ),
                 content.readableBytes == 0, buffer.readableBytes == 0
             else {
                 // Throw this error if the content wasn't exactly the right length for the message.

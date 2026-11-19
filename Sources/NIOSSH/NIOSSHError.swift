@@ -161,6 +161,19 @@ extension NIOSSHError {
     internal static func invalidCertificate(diagnostics: String) -> NIOSSHError {
         NIOSSHError(type: .invalidCertificate, diagnostics: diagnostics)
     }
+
+    internal static let unsupportedUserAuthenticationMethod = NIOSSHError(
+        type: .unsupportedUserAuthenticationMethod,
+        diagnostics: nil
+    )
+
+    @inline(never)
+    internal static func invalidKeyboardInteractiveResponse(prompts: Int, responses: Int) -> NIOSSHError {
+        NIOSSHError(
+            type: .invalidKeyboardInteractiveResponse,
+            diagnostics: "Challenge has \(prompts) prompts, but \(responses) responses were given"
+        )
+    }
 }
 
 // MARK: - NIOSSHError CustomStringConvertible conformance.
@@ -207,6 +220,8 @@ extension NIOSSHError {
             case invalidHostKeyForKeyExchange
             case invalidOpenSSHPublicKey
             case invalidCertificate
+            case unsupportedUserAuthenticationMethod
+            case invalidKeyboardInteractiveResponse
         }
 
         private var base: Base
@@ -304,6 +319,14 @@ extension NIOSSHError {
 
         /// A certificate failed validation.
         public static let invalidCertificate: ErrorType = .init(.invalidCertificate)
+
+        /// The user authentication delegate was asked to take part in an authentication method that it does not
+        /// support.
+        public static let unsupportedUserAuthenticationMethod: ErrorType = .init(.unsupportedUserAuthenticationMethod)
+
+        /// The user authentication delegate did not provide exactly one response for each prompt of a
+        /// keyboard-interactive challenge.
+        public static let invalidKeyboardInteractiveResponse: ErrorType = .init(.invalidKeyboardInteractiveResponse)
     }
 }
 

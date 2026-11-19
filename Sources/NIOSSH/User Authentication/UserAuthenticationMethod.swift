@@ -33,7 +33,12 @@ public struct NIOSSHAvailableUserAuthenticationMethods: OptionSet, Sendable {
     /// Host-based authentication is acceptable.
     public static let hostBased: NIOSSHAvailableUserAuthenticationMethods = .init(rawValue: 1 << 2)
 
-    /// A short-hand for all supported authentication types.
+    /// Keyboard-interactive authentication (RFC 4256) is acceptable.
+    ///
+    /// ``NIOSSH`` supports this method as a client only, so it is not part of ``all``.
+    public static let keyboardInteractive: NIOSSHAvailableUserAuthenticationMethods = .init(rawValue: 1 << 3)
+
+    /// A short-hand for all the authentication types that ``NIOSSH`` supports as a server.
     public static let all: NIOSSHAvailableUserAuthenticationMethods = [.publicKey, .password, .hostBased]
 }
 
@@ -49,6 +54,8 @@ extension NIOSSHAvailableUserAuthenticationMethods {
                 self.insert(.password)
             case "hostbased":
                 self.insert(.hostBased)
+            case "keyboard-interactive":
+                self.insert(.keyboardInteractive)
             default:
                 // This is an unknown method, which we ignore.
                 break
@@ -63,7 +70,7 @@ extension NIOSSHAvailableUserAuthenticationMethods {
 
         // We need an array.
         var methods = [Substring]()
-        methods.reserveCapacity(3)
+        methods.reserveCapacity(4)
 
         if self.contains(.password) {
             methods.append("password")
@@ -73,6 +80,9 @@ extension NIOSSHAvailableUserAuthenticationMethods {
         }
         if self.contains(.hostBased) {
             methods.append("hostbased")
+        }
+        if self.contains(.keyboardInteractive) {
+            methods.append("keyboard-interactive")
         }
 
         return methods
@@ -185,6 +195,12 @@ extension NIOSSHUserAuthenticationOffer {
         /// This method is currently unsupported by ``NIOSSH``.
         case hostBased(HostBased)
 
+        /// The client would like to perform keyboard-interactive authentication (RFC 4256).
+        ///
+        /// The server answers this offer with challenges, which are passed to
+        /// ``NIOSSHClientUserAuthenticationDelegate/respondToKeyboardInteractiveChallenge(_:responsePromise:)``.
+        case keyboardInteractive(KeyboardInteractive)
+
         /// The client believes it does not need authentication.
         case none
     }
@@ -232,6 +248,17 @@ extension NIOSSHUserAuthenticationOffer.Offer {
             fatalError("PublicKeyRequest is currently unimplemented")
         }
     }
+
+    /// Information provided by the client when attempting to perform keyboard-interactive authentication.
+    public struct KeyboardInteractive: Sendable {
+        /// A comma-separated list of the submethods the client would prefer the server to use. This is a hint
+        /// that servers are free to ignore, and it is usually empty.
+        public var submethods: String
+
+        public init(submethods: String = "") {
+            self.submethods = submethods
+        }
+    }
 }
 
 extension SSHMessage.UserAuthRequestMessage {
@@ -255,6 +282,8 @@ extension SSHMessage.UserAuthRequestMessage {
             self.method = .password(passwordRequest.password)
         case .hostBased:
             fatalError("Unsupported")
+        case .keyboardInteractive(let keyboardInteractiveRequest):
+            self.method = .keyboardInteractive(submethods: keyboardInteractiveRequest.submethods)
         case .none:
             self.method = .none
         }

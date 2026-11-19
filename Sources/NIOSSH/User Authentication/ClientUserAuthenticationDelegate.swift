@@ -38,4 +38,35 @@ public protocol NIOSSHClientUserAuthenticationDelegate {
         availableMethods: NIOSSHAvailableUserAuthenticationMethods,
         nextChallengePromise: EventLoopPromise<NIOSSHUserAuthenticationOffer?>
     )
+
+    /// Called when the server issues a challenge during keyboard-interactive authentication (RFC 4256).
+    ///
+    /// This is only called after the delegate has offered
+    /// ``NIOSSHUserAuthenticationOffer/Offer-swift.enum/keyboardInteractive(_:)``. The server may issue several
+    /// challenges for one offer, so this may be called several times before the offer is accepted or rejected. It
+    /// is never called while an earlier challenge is unanswered.
+    ///
+    /// The delegate must succeed `responsePromise` with exactly one response for each of the challenge's
+    /// prompts, in order: for a challenge with no prompts, an empty array. Any other number of responses is an
+    /// error and nothing is sent to the server. If the delegate fails `responsePromise` nothing is sent to the
+    /// server either, and the error is reported on the channel.
+    ///
+    /// The default implementation fails `responsePromise`.
+    ///
+    /// - parameters:
+    ///     - challenge: The challenge issued by the server.
+    ///     - responsePromise: An `EventLoopPromise` to be fulfilled with one response for each prompt.
+    func respondToKeyboardInteractiveChallenge(
+        _ challenge: NIOSSHKeyboardInteractiveChallenge,
+        responsePromise: EventLoopPromise<[String]>
+    )
+}
+
+extension NIOSSHClientUserAuthenticationDelegate {
+    public func respondToKeyboardInteractiveChallenge(
+        _ challenge: NIOSSHKeyboardInteractiveChallenge,
+        responsePromise: EventLoopPromise<[String]>
+    ) {
+        responsePromise.fail(NIOSSHError.unsupportedUserAuthenticationMethod)
+    }
 }
