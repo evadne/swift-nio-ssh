@@ -2264,6 +2264,150 @@ final class ChildChannelMultiplexerTests: XCTestCase {
 
         XCTAssertEqual(try channel.getOption(SSHChildChannelOptions.peerMaximumMessageLength).wait(), 4247)
     }
+
+    /// Sends a message to a channel that we have requested and that the peer has not confirmed yet. The peer has
+    /// no channel ID of its own to be told to close, so this must be an error of the connection that leaves the
+    /// channel waiting for the peer's answer.
+    private func assertRejectedBeforeOpenConfirmation(
+        _ message: (UInt32) -> SSHMessage,
+        file: StaticString = #filePath,
+        line: UInt = #line
+    ) {
+        let harness = self.harnessForbiddingInboundChannels()
+        defer {
+            harness.finish()
+        }
+
+        let errorLogger = ErrorLoggingHandler()
+        let childResult = NIOLoopBoundBox<Result<Channel, Error>?>(nil, eventLoop: harness.eventLoop)
+        let childPromise: EventLoopPromise<Channel> = harness.eventLoop.makePromise()
+        childPromise.futureResult.whenComplete { childResult.value = $0 }
+        harness.multiplexer.createChildChannel(childPromise, channelType: .session) { channel, _ in
+            channel.eventLoop.makeCompletedFuture {
+                try channel.pipeline.syncOperations.addHandler(errorLogger)
+            }
+        }
+
+        XCTAssertEqual(harness.flushedMessages.count, 1, file: file, line: line)
+        guard let channelID = self.assertChannelOpen(harness.flushedMessages.first) else {
+            return
+        }
+
+        XCTAssertThrowsError(try harness.multiplexer.receiveMessage(message(channelID)), file: file, line: line) {
+            error in
+            XCTAssertEqual((error as? NIOSSHError)?.type, .protocolViolation, file: file, line: line)
+        }
+        harness.eventLoop.run()
+
+        // The channel took no part in that: it sent nothing, and it is still waiting.
+        XCTAssertEqual(harness.flushedMessages.count, 1, file: file, line: line)
+        XCTAssertEqual(errorLogger.errors.count, 0, file: file, line: line)
+        XCTAssertNil(childResult.value, file: file, line: line)
+
+        // The peer can still confirm it.
+        XCTAssertNoThrow(
+            try harness.multiplexer.receiveMessage(
+                self.openConfirmation(originalChannelID: channelID, peerChannelID: 1)
+            ),
+            file: file,
+            line: line
+        )
+        XCTAssertNoThrow(try XCTUnwrap(childResult.value, file: file, line: line).get(), file: file, line: line)
+    }
+
+    func testDataBeforeOpenConfirmationIsRejected() {
+        self.assertRejectedBeforeOpenConfirmation {
+            self.data(peerChannelID: $0, data: ByteBuffer(string: "too early"))
+        }
+    }
+
+    func testExtendedDataBeforeOpenConfirmationIsRejected() {
+        self.assertRejectedBeforeOpenConfirmation {
+            .channelExtendedData(
+                .init(recipientChannel: $0, dataTypeCode: .stderr, data: ByteBuffer(string: "too early"))
+            )
+        }
+    }
+
+    func testWindowAdjustBeforeOpenConfirmationIsRejected() {
+        self.assertRejectedBeforeOpenConfirmation {
+            self.windowAdjust(peerChannelID: $0, increment: 1024)
+        }
+    }
+
+    func testEOFBeforeOpenConfirmationIsRejected() {
+        self.assertRejectedBeforeOpenConfirmation {
+            self.eof(peerChannelID: $0)
+        }
+    }
+
+    func testCloseBeforeOpenConfirmationIsRejected() {
+        self.assertRejectedBeforeOpenConfirmation {
+            self.close(peerChannelID: $0)
+        }
+    }
+
+    func testChannelRequestBeforeOpenConfirmationIsRejected() {
+        self.assertRejectedBeforeOpenConfirmation {
+            .channelRequest(.init(recipientChannel: $0, type: .exitStatus(0), wantReply: true))
+        }
+    }
+
+    func testChannelSuccessBeforeOpenConfirmationIsRejected() {
+        self.assertRejectedBeforeOpenConfirmation {
+            .channelSuccess(.init(recipientChannel: $0))
+        }
+    }
+
+    func testChannelFailureBeforeOpenConfirmationIsRejected() {
+        self.assertRejectedBeforeOpenConfirmation {
+            .channelFailure(.init(recipientChannel: $0))
+        }
+    }
+
+    func testMessagesBeforeTheChannelIsRequestedAreRejected() {
+        let harness = self.harnessForbiddingInboundChannels()
+        defer {
+            harness.finish()
+        }
+
+        let childResult = NIOLoopBoundBox<Result<Channel, Error>?>(nil, eventLoop: harness.eventLoop)
+        let childPromise: EventLoopPromise<Channel> = harness.eventLoop.makePromise()
+        childPromise.futureResult.whenComplete { childResult.value = $0 }
+        let delayPromise = harness.eventLoop.makePromise(of: Void.self)
+        harness.multiplexer.createChildChannel(childPromise, channelType: .session) { _, _ in
+            delayPromise.futureResult
+        }
+
+        // The channel has an ID here, the first, but it is not on the network until its initializer completes.
+        XCTAssertEqual(harness.flushedMessages.count, 0)
+
+        // The peer cannot know of the channel, and whatever it sends to it is an error of the connection.
+        let messages: [SSHMessage] = [
+            self.openConfirmation(originalChannelID: 0, peerChannelID: 1),
+            self.openFailure(originalChannelID: 0, reasonCode: 2),
+            self.data(peerChannelID: 0, data: ByteBuffer(string: "too early")),
+            self.close(peerChannelID: 0),
+        ]
+        for message in messages {
+            XCTAssertThrowsError(try harness.multiplexer.receiveMessage(message), "\(message)") { error in
+                XCTAssertEqual((error as? NIOSSHError)?.type, .protocolViolation)
+            }
+        }
+        harness.eventLoop.run()
+        XCTAssertEqual(harness.flushedMessages.count, 0)
+        XCTAssertNil(childResult.value)
+
+        // Once the initializer completes the channel is requested, and the peer can confirm it.
+        delayPromise.succeed(())
+        XCTAssertEqual(harness.flushedMessages.count, 1)
+        XCTAssertEqual(self.assertChannelOpen(harness.flushedMessages.first), 0)
+        XCTAssertNil(childResult.value)
+        XCTAssertNoThrow(
+            try harness.multiplexer.receiveMessage(self.openConfirmation(originalChannelID: 0, peerChannelID: 1))
+        )
+        XCTAssertNoThrow(try XCTUnwrap(childResult.value).get())
+    }
 }
 
 extension ByteBuffer {

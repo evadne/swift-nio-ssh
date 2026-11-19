@@ -864,6 +864,60 @@ class EndToEndTests: XCTestCase {
         XCTAssertEqual(err.value as? ChannelError?, .eof)
     }
 
+    func testChannelMessagesBeforeOpenConfirmationAreProtocolViolations() throws {
+        // The peers protect nothing, so that this test can play the server once the client has authenticated.
+        XCTAssertNoThrow(try self.channel.configureWithHarness(.scriptable()))
+        XCTAssertNoThrow(try self.channel.activate())
+        XCTAssertNoThrow(try self.channel.interactInMemory())
+
+        let childResult = NIOLoopBoundBox<Result<Channel, Error>?>(nil, eventLoop: self.channel.client.eventLoop)
+        let childPromise = self.channel.client.eventLoop.makePromise(of: Channel.self)
+        childPromise.futureResult.whenComplete { childResult.value = $0 }
+        self.channel.clientSSHHandler?.createChannel(childPromise, channelType: .session, nil)
+
+        // The client has requested a channel. The server does not answer the request.
+        guard case .some(.channelOpen(let request)) = try self.channel.messagesForScriptedServer().first else {
+            return XCTFail("Expected the client to request a channel")
+        }
+        let channelID = request.senderChannel
+
+        // Until the server confirms the channel it has nothing to say to it. Each of these must be an error, and
+        // must leave the client running.
+        let data = ByteBuffer(string: "too early")
+        let messages: [SSHMessage] = [
+            .channelData(.init(recipientChannel: channelID, data: data)),
+            .channelExtendedData(.init(recipientChannel: channelID, dataTypeCode: .stderr, data: data)),
+            .channelWindowAdjust(.init(recipientChannel: channelID, bytesToAdd: 1024)),
+            .channelEOF(.init(recipientChannel: channelID)),
+            .channelClose(.init(recipientChannel: channelID)),
+            .channelRequest(.init(recipientChannel: channelID, type: .exitStatus(0), wantReply: true)),
+            .channelSuccess(.init(recipientChannel: channelID)),
+            .channelFailure(.init(recipientChannel: channelID)),
+        ]
+        for message in messages {
+            XCTAssertThrowsError(try self.channel.sendFromScriptedServer(message), "\(message)") { error in
+                XCTAssertEqual((error as? NIOSSHError)?.type, .protocolViolation)
+            }
+        }
+        XCTAssertEqual(try self.channel.messagesForScriptedServer(), [])
+        XCTAssertNil(childResult.value)
+
+        // The channel is still the server's to confirm.
+        XCTAssertNoThrow(
+            try self.channel.sendFromScriptedServer(
+                .channelOpenConfirmation(
+                    .init(
+                        recipientChannel: channelID,
+                        senderChannel: 1,
+                        initialWindowSize: 1 << 24,
+                        maximumPacketSize: 1 << 15
+                    )
+                )
+            )
+        )
+        XCTAssertNoThrow(try XCTUnwrap(childResult.value).get())
+    }
+
     func testChildChannelCreatedWhileParentUnwritableBecomesWritable() throws {
         XCTAssertNoThrow(try self.channel.configureWithHarness(TestHarness()))
         XCTAssertNoThrow(try self.channel.activate())

@@ -737,7 +737,9 @@ extension SSHChildChannel {
     ///
     /// - parameters:
     ///     - frame: The `SSHMessage` received from the network.
-    func receiveInboundMessage(_ message: SSHMessage) {
+    /// - throws: If the message is invalid and the peer has not yet told us its ID for this channel. That is an
+    ///     error for the whole connection.
+    func receiveInboundMessage(_ message: SSHMessage) throws {
         do {
             switch message {
             case .channelOpen(let message):
@@ -766,6 +768,15 @@ extension SSHChildChannel {
                 preconditionFailure("Channels only handle channel messages")
             }
         } catch {
+            guard self.state.remoteChannelIdentifier != nil else {
+                // We have either not requested this channel yet or are still waiting for the peer to answer our
+                // request, so the peer has no business sending us this message. We cannot treat this as an error
+                // on the channel, as that requires sending SSH_MSG_CHANNEL_CLOSE and we have no peer channel ID to
+                // send it to. Instead this is a connection error: we leave the channel alone and let our parent
+                // deal with it.
+                throw error
+            }
+
             self.errorEncountered(error: error)
         }
     }

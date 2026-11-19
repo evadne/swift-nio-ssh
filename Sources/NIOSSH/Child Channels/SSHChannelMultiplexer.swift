@@ -154,7 +154,7 @@ extension SSHChannelMultiplexer {
         }
 
         if let channel = channel {
-            channel.receiveInboundMessage(message)
+            try channel.receiveInboundMessage(message)
         }
     }
 
