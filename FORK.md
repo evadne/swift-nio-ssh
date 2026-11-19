@@ -37,7 +37,7 @@ The series is the commits after `FORK.md` on the branch:
 
 It has two parts. What was written for this fork stands before and after what was picked.
 
-**Written for this fork**, eighteen commits.
+**Written for this fork**, nineteen commits.
 
 Eleven come first, each a feature that is off or has Apple's value until the application sets
 it: host certificate algorithms offered; keys of a custom kind that sign, and host keys of a
@@ -103,6 +103,25 @@ server that presents one although no certificate algorithm was negotiated is ref
 `invalidHostKeyForKeyExchange`, where it was refused with the parse error; and a certificate
 that was read and not changed is written as it was read.
 
+One more fix of a defect follows them, made after a test showed the defect on this branch:
+
+- A certificate that names a certificate as the key that signed it is refused on the name of
+  that key's format, before anything else of the key is read. It was refused before as well,
+  but only once the certificate inside it had been read whole, and the one inside that, for
+  as many as a peer had put inside one another, and each took stack. A server could present
+  a host certificate nested so in its key exchange reply and stop the client's process,
+  before the delegate was asked about the host key, and whether or not the client had
+  offered a certificate algorithm. The tests do it with 900 certificates in one packet, read
+  on a thread with a stack of half a megabyte. The refusal is `invalidCertificate`, as it
+  was. A certificate for a key of a kind that the package does not have
+  (`ssh-rsa-cert-v01@openssh.com`, say) would have been kept as its bytes, and is refused as
+  a signature key in the same way: a format whose name ends in `-cert-v01@openssh.com` is a
+  certificate, which is how OpenSSH 10.3 names every one of its certificate formats. OpenSSH
+  reads the signature key of a certificate with certificates disallowed (`cert_parse` in its
+  `sshkey.c`). One reader serves every place where a key is read: a host key, the key in a
+  user authentication request and in its acceptance, and
+  `NIOSSHPublicKey.init(openSSHPublicKey:)`.
+
 **Picked from other works**, each after a test showed the defect on this branch; the works
 are listed under [Attribution](#attribution):
 
@@ -167,7 +186,7 @@ package or of a pull request to it, in a tree that carries Apple's `LICENSE.txt`
 
 ### Followed
 
-The eighteen patches written for this fork copy no code from another work. Where one follows
+The nineteen patches written for this fork copy no code from another work. Where one follows
 the names or the design of another work, so that an application written against it needs
 little change if Apple takes that work, the patch's message says so. Those works, all under
 the Apache License 2.0:
