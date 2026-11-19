@@ -50,6 +50,20 @@ public struct SSHClientConfiguration {
         }
     }
 
+    /// Whether this client offers the OpenSSH host certificate algorithms (`*-cert-v01@openssh.com`) ahead of
+    /// the plain host key algorithms. Defaults to `false`.
+    ///
+    /// When this is `true` a server that holds a host certificate presents it instead of its plain host key.
+    /// The certificate is passed to
+    /// ``NIOSSHClientServerAuthenticationDelegate/validateHostKey(hostKey:validationCompletePromise:)`` as a
+    /// ``NIOSSHPublicKey`` that wraps a ``NIOSSHCertifiedPublicKey``, which can be unwrapped with
+    /// ``NIOSSHCertifiedPublicKey/init(_:)``.
+    ///
+    /// ``NIOSSH`` proves only that the server holds the private key that the certificate certifies. It does
+    /// **not** validate the certificate: the delegate is responsible for checking the certificate authority, the
+    /// principals, the validity window and the critical options before it trusts the certificate.
+    public var advertiseHostCertificateAlgorithms: Bool = false
+
     public init(
         userAuthDelegate: NIOSSHClientUserAuthenticationDelegate,
         serverAuthDelegate: NIOSSHClientServerAuthenticationDelegate,

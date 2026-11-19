@@ -560,7 +560,11 @@ struct SSHKeyExchangeStateMachine {
     // The host key algorithms supported by this peer, in order of preference.
     private var supportedHostKeyAlgorithms: [Substring] {
         switch self.role {
-        case .client:
+        case .client(let configuration):
+            if configuration.advertiseHostCertificateAlgorithms {
+                // A host that has a certificate should present it, so the certificate algorithms come first.
+                return Self.supportedServerHostCertificateAlgorithms + Self.supportedServerHostKeyAlgorithms
+            }
             return Self.supportedServerHostKeyAlgorithms
         case .server(let configuration):
             return configuration.hostKeys.flatMap { $0.hostKeyAlgorithms }
@@ -603,6 +607,13 @@ extension SSHKeyExchangeStateMachine {
     /// All known host key algorithms.
     static let supportedServerHostKeyAlgorithms: [Substring] = [
         "ssh-ed25519", "ecdsa-sha2-nistp384", "ecdsa-sha2-nistp256", "ecdsa-sha2-nistp521",
+    ]
+
+    /// The OpenSSH host certificate algorithms for the host key types we support, in the same order of
+    /// preference. Clients offer these only when configured to do so.
+    static let supportedServerHostCertificateAlgorithms: [Substring] = [
+        "ssh-ed25519-cert-v01@openssh.com", "ecdsa-sha2-nistp384-cert-v01@openssh.com",
+        "ecdsa-sha2-nistp256-cert-v01@openssh.com", "ecdsa-sha2-nistp521-cert-v01@openssh.com",
     ]
 }
 
