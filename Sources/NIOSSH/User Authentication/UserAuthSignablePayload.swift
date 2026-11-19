@@ -32,7 +32,15 @@ import NIOCore
 internal struct UserAuthSignablePayload {
     private(set) var bytes: ByteBuffer
 
-    init(sessionIdentifier: ByteBuffer, userName: String, serviceName: String, publicKey: NIOSSHPublicKey) {
+    /// - parameters:
+    ///     - signatureAlgorithm: The name of the public key algorithm, where it is not the prefix of `publicKey`.
+    init(
+        sessionIdentifier: ByteBuffer,
+        userName: String,
+        serviceName: String,
+        publicKey: NIOSSHPublicKey,
+        signatureAlgorithm: String? = nil
+    ) {
         // We use the session identifier as the base buffer and just append to it. We ask for 1kB because it's likely
         // enough for this data.
         var sessionIdentifier = sessionIdentifier
@@ -45,7 +53,11 @@ internal struct UserAuthSignablePayload {
         newBuffer.writeSSHString(serviceName.utf8)
         newBuffer.writeSSHString("publickey".utf8)
         newBuffer.writeSSHBoolean(true)
-        newBuffer.writeSSHString(publicKey.keyPrefix)
+        if let signatureAlgorithm = signatureAlgorithm {
+            newBuffer.writeSSHString(signatureAlgorithm.utf8)
+        } else {
+            newBuffer.writeSSHString(publicKey.keyPrefix)
+        }
         newBuffer.writeCompositeSSHString { buffer in
             buffer.writeSSHHostKey(publicKey)
         }

@@ -66,6 +66,13 @@ public struct NIOSSHPublicKey: Sendable, Hashable {
     public init(_ certifiedKey: NIOSSHCertifiedPublicKey) {
         self.backingKey = .certified(certifiedKey)
     }
+
+    /// Create a ``NIOSSHPublicKey`` from a public key of a kind that ``NIOSSH`` does not have built in.
+    ///
+    /// ``NIOSSH`` can send such a key to a peer, but cannot use it to verify a signature.
+    public init<Key: NIOSSHPublicKeyProtocol>(custom key: Key) {
+        self.backingKey = .custom(key)
+    }
 }
 
 extension NIOSSHPublicKey {
@@ -99,7 +106,9 @@ extension NIOSSHPublicKey {
         case (.ed25519, _),
             (.ecdsaP256, _),
             (.ecdsaP384, _),
-            (.ecdsaP521, _):
+            (.ecdsaP521, _),
+            (.custom, _):
+            // We cannot verify with a key of a custom kind.
             return false
         }
     }
@@ -121,7 +130,9 @@ extension NIOSSHPublicKey {
         case (.ed25519, _),
             (.ecdsaP256, _),
             (.ecdsaP384, _),
-            (.ecdsaP521, _):
+            (.ecdsaP521, _),
+            (.custom, _):
+            // We cannot verify with a key of a custom kind.
             return false
         }
     }
@@ -143,7 +154,9 @@ extension NIOSSHPublicKey {
         case (.ed25519, _),
             (.ecdsaP256, _),
             (.ecdsaP384, _),
-            (.ecdsaP521, _):
+            (.ecdsaP521, _),
+            (.custom, _):
+            // We cannot verify with a key of a custom kind.
             return false
         }
     }
@@ -157,6 +170,7 @@ extension NIOSSHPublicKey {
         case ecdsaP256(P256.Signing.PublicKey)
         case ecdsaP384(P384.Signing.PublicKey)
         case ecdsaP521(P521.Signing.PublicKey)
+        case custom(any NIOSSHPublicKeyProtocol)
         case certified(NIOSSHCertifiedPublicKey)  // This case recursively contains `NIOSSHPublicKey`.
     }
 
@@ -182,6 +196,8 @@ extension NIOSSHPublicKey {
             return Self.ecdsaP384PublicKeyPrefix
         case .ecdsaP521:
             return Self.ecdsaP521PublicKeyPrefix
+        case .custom(let key):
+            return type(of: key).publicKeyPrefix.utf8
         case .certified(let base):
             return base.keyPrefix
         }
@@ -207,12 +223,16 @@ extension NIOSSHPublicKey.BackingKey: Equatable {
             return lhs.rawRepresentation == rhs.rawRepresentation
         case (.ecdsaP521(let lhs), .ecdsaP521(let rhs)):
             return lhs.rawRepresentation == rhs.rawRepresentation
+        case (.custom(let lhs), .custom(let rhs)):
+            return type(of: lhs).publicKeyPrefix == type(of: rhs).publicKeyPrefix
+                && lhs.writtenBytes == rhs.writtenBytes
         case (.certified(let lhs), .certified(let rhs)):
             return lhs == rhs
         case (.ed25519, _),
             (.ecdsaP256, _),
             (.ecdsaP384, _),
             (.ecdsaP521, _),
+            (.custom, _),
             (.certified, _):
             return false
         }
@@ -237,6 +257,10 @@ extension NIOSSHPublicKey.BackingKey: Hashable {
         case .certified(let pkey):
             hasher.combine(5)
             hasher.combine(pkey)
+        case .custom(let pkey):
+            hasher.combine(6)
+            hasher.combine(type(of: pkey).publicKeyPrefix)
+            hasher.combine(pkey.writtenBytes)
         }
     }
 }
@@ -260,6 +284,9 @@ extension ByteBuffer {
         case .ecdsaP521(let key):
             writtenBytes += self.writeSSHString(NIOSSHPublicKey.ecdsaP521PublicKeyPrefix)
             writtenBytes += self.writeECDSAP521PublicKey(baseKey: key)
+        case .custom(let key):
+            writtenBytes += self.writeSSHString(type(of: key).publicKeyPrefix.utf8)
+            writtenBytes += key.write(to: &self)
         case .certified(let key):
             return self.writeCertifiedKey(key)
         }
@@ -281,6 +308,8 @@ extension ByteBuffer {
             return self.writeECDSAP384PublicKey(baseKey: key)
         case .ecdsaP521(let key):
             return self.writeECDSAP521PublicKey(baseKey: key)
+        case .custom:
+            preconditionFailure("Certified keys are the only callers of this method, and cannot contain custom keys")
         case .certified:
             preconditionFailure("Certified keys are the only callers of this method, and cannot contain themselves")
         }

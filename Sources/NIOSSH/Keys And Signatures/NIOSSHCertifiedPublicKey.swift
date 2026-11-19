@@ -359,6 +359,8 @@ extension NIOSSHCertifiedPublicKey {
             return Self.p384KeyPrefix
         case .ecdsaP521:
             return Self.p521KeyPrefix
+        case .custom:
+            preconditionFailure("base key cannot be of a custom kind")
         case .certified:
             preconditionFailure("base key cannot be certified")
         }
@@ -514,6 +516,14 @@ extension NIOSSHCertifiedPublicKey {
             }
             if case .certified = signatureKey.backingKey {
                 throw NIOSSHError.invalidCertificate(diagnostics: "Certificate may not be signed by certified key")
+            }
+
+            // We can neither name the certificate type of a key of a custom kind nor verify a signature made by one.
+            if case .custom = key.backingKey {
+                throw NIOSSHError.invalidCertificate(diagnostics: "Certificate may not use custom key as public key")
+            }
+            if case .custom = signatureKey.backingKey {
+                throw NIOSSHError.invalidCertificate(diagnostics: "Certificate may not be signed by custom key")
             }
 
             self.nonce = nonce

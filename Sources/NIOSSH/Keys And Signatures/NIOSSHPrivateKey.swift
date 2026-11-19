@@ -58,6 +58,14 @@ public struct NIOSSHPrivateKey: Sendable {
     }
     #endif
 
+    /// Create a ``NIOSSHPrivateKey`` from a private key of a kind that ``NIOSSH`` does not have built in.
+    ///
+    /// This allows keys such as RSA keys, and keys that only some other party can sign with, to be used for
+    /// user authentication.
+    public init<Key: NIOSSHPrivateKeyProtocol>(custom key: Key) {
+        self.backingKey = .custom(key)
+    }
+
     // The algorithms that apply to this host key.
     internal var hostKeyAlgorithms: [Substring] {
         switch self.backingKey {
@@ -69,9 +77,25 @@ public struct NIOSSHPrivateKey: Sendable {
             return ["ecdsa-sha2-nistp384"]
         case .ecdsaP521:
             return ["ecdsa-sha2-nistp521"]
+        case .custom(let key):
+            return [Substring(key.signatureAlgorithm)]
         #if canImport(Darwin)
         case .secureEnclaveP256:
             return ["ecdsa-sha2-nistp256"]
+        #endif
+        }
+    }
+
+    /// The name of the public key algorithm this key signs with, where that is not the prefix of its public key.
+    internal var customSignatureAlgorithm: String? {
+        switch self.backingKey {
+        case .custom(let key):
+            return key.signatureAlgorithm
+        case .ed25519, .ecdsaP256, .ecdsaP384, .ecdsaP521:
+            return nil
+        #if canImport(Darwin)
+        case .secureEnclaveP256:
+            return nil
         #endif
         }
     }
@@ -84,6 +108,7 @@ extension NIOSSHPrivateKey {
         case ecdsaP256(P256.Signing.PrivateKey)
         case ecdsaP384(P384.Signing.PrivateKey)
         case ecdsaP521(P521.Signing.PrivateKey)
+        case custom(any NIOSSHPrivateKeyProtocol)
 
         #if canImport(Darwin)
         case secureEnclaveP256(SecureEnclave.P256.Signing.PrivateKey)
@@ -114,6 +139,11 @@ extension NIOSSHPrivateKey {
                 try key.signature(for: ptr)
             }
             return NIOSSHSignature(backingSignature: .ecdsaP521(signature))
+        case .custom(let key):
+            let blob = try digest.withUnsafeBytes { ptr in
+                try key.signature(for: ptr)
+            }
+            return NIOSSHSignature(backingSignature: .custom(algorithm: key.signatureAlgorithm, blob: blob))
 
         #if canImport(Darwin)
         case .secureEnclaveP256(let key):
@@ -139,6 +169,9 @@ extension NIOSSHPrivateKey {
         case .ecdsaP521(let key):
             let signature = try key.signature(for: payload.bytes.readableBytesView)
             return NIOSSHSignature(backingSignature: .ecdsaP521(signature))
+        case .custom(let key):
+            let blob = try key.signature(for: payload.bytes.readableBytesView)
+            return NIOSSHSignature(backingSignature: .custom(algorithm: key.signatureAlgorithm, blob: blob))
         #if canImport(Darwin)
         case .secureEnclaveP256(let key):
             let signature = try key.signature(for: payload.bytes.readableBytesView)
@@ -160,6 +193,8 @@ extension NIOSSHPrivateKey {
             return NIOSSHPublicKey(backingKey: .ecdsaP384(privateKey.publicKey))
         case .ecdsaP521(let privateKey):
             return NIOSSHPublicKey(backingKey: .ecdsaP521(privateKey.publicKey))
+        case .custom(let privateKey):
+            return NIOSSHPublicKey(backingKey: .custom(privateKey.publicKey))
         #if canImport(Darwin)
         case .secureEnclaveP256(let privateKey):
             return NIOSSHPublicKey(backingKey: .ecdsaP256(privateKey.publicKey))

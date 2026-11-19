@@ -42,6 +42,9 @@ extension NIOSSHSignature {
 
         case ecdsaP521(P521.Signing.ECDSASignature)
 
+        // A signature made by a key of a custom kind: the name of the algorithm, and the bytes that follow it.
+        case custom(algorithm: String, blob: ByteBuffer)
+
         internal enum RawBytes {
             case byteBuffer(ByteBuffer)
             case data(Data)
@@ -81,6 +84,19 @@ extension NIOSSHSignature.BackingSignature.RawBytes: Equatable {
 
 extension NIOSSHSignature.BackingSignature.RawBytes: Hashable {}
 
+extension NIOSSHSignature {
+    /// The name of the public key algorithm this signature was made with, where the signature was made by a key
+    /// of a custom kind.
+    internal var customAlgorithm: String? {
+        switch self.backingSignature {
+        case .custom(let algorithm, _):
+            return algorithm
+        case .ed25519, .ecdsaP256, .ecdsaP384, .ecdsaP521:
+            return nil
+        }
+    }
+}
+
 extension NIOSSHSignature.BackingSignature: Equatable {
     static func == (lhs: NIOSSHSignature.BackingSignature, rhs: NIOSSHSignature.BackingSignature) -> Bool {
         // We implement equatable in terms of the key representation.
@@ -93,10 +109,13 @@ extension NIOSSHSignature.BackingSignature: Equatable {
             return lhs.rawRepresentation == rhs.rawRepresentation
         case (.ecdsaP521(let lhs), .ecdsaP521(let rhs)):
             return lhs.rawRepresentation == rhs.rawRepresentation
+        case (.custom(let lhsAlgorithm, let lhsBlob), .custom(let rhsAlgorithm, let rhsBlob)):
+            return lhsAlgorithm == rhsAlgorithm && lhsBlob == rhsBlob
         case (.ed25519, _),
             (.ecdsaP256, _),
             (.ecdsaP384, _),
-            (.ecdsaP521, _):
+            (.ecdsaP521, _),
+            (.custom, _):
             return false
         }
     }
@@ -117,6 +136,10 @@ extension NIOSSHSignature.BackingSignature: Hashable {
         case .ecdsaP521(let sig):
             hasher.combine(3)
             hasher.combine(sig.rawRepresentation)
+        case .custom(let algorithm, let blob):
+            hasher.combine(4)
+            hasher.combine(algorithm)
+            hasher.combine(blob)
         }
     }
 }
@@ -134,6 +157,10 @@ extension ByteBuffer {
             return self.writeECDSAP384Signature(baseSignature: sig)
         case .ecdsaP521(let sig):
             return self.writeECDSAP521Signature(baseSignature: sig)
+        case .custom(let algorithm, var blob):
+            var writtenLength = self.writeSSHString(algorithm.utf8)
+            writtenLength += self.writeBuffer(&blob)
+            return writtenLength
         }
     }
 
