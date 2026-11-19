@@ -37,7 +37,7 @@ The series is the commits after `FORK.md` on the branch:
 
 It has two parts. What was written for this fork stands before and after what was picked.
 
-**Written for this fork**, fourteen commits.
+**Written for this fork**, fifteen commits.
 
 Eleven come first, each a feature that is off or has Apple's value until the application sets
 it: host certificate algorithms offered; keys of a custom kind that sign, and host keys of a
@@ -45,7 +45,7 @@ custom kind; keyboard-interactive authentication for a client; partial success r
 global requests that NIOSSH does not know, sent and received; the peer's disconnect message
 reported; the client's software version; strict key exchange; and extension negotiation.
 
-Three come last, each the fix of a defect, made after a test showed the defect on this
+Four come last, each the fix of a defect, made after a test showed the defect on this
 branch:
 
 - A message for a channel that the peer has not confirmed is a protocol violation of the
@@ -57,6 +57,11 @@ branch:
 - A global request that the application sends during a rekey is sent when the rekey ends,
   whichever peer ends it. Where the client's own new keys message ended it, the request waited
   until the server next sent something.
+- A channel whose peer sets the maximum packet size to zero is refused, where the first
+  write to it never returned. A server could confirm a channel so and hold the client's event
+  loop. A channel that the client asked for fails with a protocol violation and is closed; one
+  that the peer asks for is answered with a failure. The connection goes on. Every other
+  value is worked with as before, down to a maximum packet size of one.
 
 **Picked from other works**, each after a test showed the defect on this branch; the works
 are listed under [Attribution](#attribution):
@@ -122,7 +127,7 @@ package or of a pull request to it, in a tree that carries Apple's `LICENSE.txt`
 
 ### Followed
 
-The fourteen patches written for this fork copy no code from another work. Where one follows
+The fifteen patches written for this fork copy no code from another work. Where one follows
 the names or the design of another work, so that an application written against it needs
 little change if Apple takes that work, the patch's message says so. Those works, all under
 the Apache License 2.0:
