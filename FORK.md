@@ -35,14 +35,28 @@ The series is the commits after `FORK.md` on the branch:
 
     git log --oneline --reverse 0.15.1..looking-glass/0.15.1
 
-It has two parts, in this order.
+It has two parts. What was written for this fork stands before and after what was picked.
 
-**Written for this fork**, eleven commits, each a feature that is off or has Apple's value
-until the application sets it: host certificate algorithms offered; keys of a custom kind
-that sign, and host keys of a custom kind; keyboard-interactive authentication for a client;
-partial success reported; global requests that NIOSSH does not know, sent and received; the
-peer's disconnect message reported; the client's software version; strict key exchange; and
-extension negotiation.
+**Written for this fork**, fourteen commits.
+
+Eleven come first, each a feature that is off or has Apple's value until the application sets
+it: host certificate algorithms offered; keys of a custom kind that sign, and host keys of a
+custom kind; keyboard-interactive authentication for a client; partial success reported;
+global requests that NIOSSH does not know, sent and received; the peer's disconnect message
+reported; the client's software version; strict key exchange; and extension negotiation.
+
+Three come last, each the fix of a defect, made after a test showed the defect on this
+branch:
+
+- A message for a channel that the peer has not confirmed is a protocol violation of the
+  connection, where it trapped. A server could answer a request for a channel with channel
+  data and stop the client's process. The channel is left as it was. So is a channel that is
+  not yet requested, which failed, and whose promise of creation was then never completed.
+- A reply to a global request that is ready during a rekey is held and sent after it, in the
+  order of the requests, where it was refused and lost.
+- A global request that the application sends during a rekey is sent when the rekey ends,
+  whichever peer ends it. Where the client's own new keys message ended it, the request waited
+  until the server next sent something.
 
 **Picked from other works**, each after a test showed the defect on this branch; the works
 are listed under [Attribution](#attribution):
@@ -108,7 +122,7 @@ package or of a pull request to it, in a tree that carries Apple's `LICENSE.txt`
 
 ### Followed
 
-The eleven patches written for this fork copy no code from another work. Where one follows
+The fourteen patches written for this fork copy no code from another work. Where one follows
 the names or the design of another work, so that an application written against it needs
 little change if Apple takes that work, the patch's message says so. Those works, all under
 the Apache License 2.0:
