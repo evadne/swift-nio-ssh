@@ -51,6 +51,14 @@ import Bionic
 /// from ``NIOSSHPublicKey`` and ``NIOSSHPublicKey`` has a non-failing constructor from this key type. This allows users
 /// to check at runtime whether a given ``NIOSSHPublicKey`` is _actually_ a ``NIOSSHCertifiedPublicKey``, and allows
 /// users that have a ``NIOSSHCertifiedPublicKey`` to use it as though it were a ``NIOSSHPublicKey``.
+///
+/// A certificate authority may sign with a key of a kind that SwiftNIO SSH does not know, such as an RSA key, or with
+/// an algorithm that it does not know. Such a certificate can still be read from the network: the key it certifies is
+/// usable, so a peer that presents the certificate can prove that it holds that key, and the certificate can be
+/// written out again as it was signed. Its ``signatureKey`` and ``signature`` can only be compared and written, and
+/// ``validate(principal:type:allowedAuthoritySigningKeys:acceptableCriticalOptions:)`` always refuses it, as
+/// SwiftNIO SSH cannot verify the signature. A user that wants to trust such a certificate has to verify it itself,
+/// from its bytes.
 public struct NIOSSHCertifiedPublicKey {
     /// A CA-provided random bitstring of arbitrary length (typically 16 or 32 bytes). This defends against
     /// hash-collision attacks.
@@ -188,6 +196,9 @@ public struct NIOSSHCertifiedPublicKey {
     }
 
     /// The public key corresponding to the private key used to sign this ``NIOSSHCertifiedPublicKey``.
+    ///
+    /// For a certificate that was read from the network this may be a key of a kind that SwiftNIO SSH does not know.
+    /// Such a key can be compared and written, and it verifies nothing.
     public var signatureKey: NIOSSHPublicKey {
         get {
             self.backing.signatureKey
@@ -199,6 +210,9 @@ public struct NIOSSHCertifiedPublicKey {
     }
 
     /// The signature over this certificate.
+    ///
+    /// For a certificate that was read from the network this may be a signature made with an algorithm that
+    /// SwiftNIO SSH does not know. Such a signature can be compared and written, and no key finds it valid.
     public var signature: NIOSSHSignature {
         get {
             self.backing.signature
@@ -272,7 +286,9 @@ extension NIOSSHCertifiedPublicKey {
     /// These values will not have been validated: validating them is the responsibility of the caller of this
     /// function, and failure to do so may lead to critical security flaws.
     ///
-    /// If any of the above tests fail, this function will throw an error.
+    /// If any of the above tests fail, this function will throw an error. It also throws an error for any
+    /// certificate that was signed by a key of a kind, or with an algorithm, that SwiftNIO SSH does not know: the
+    /// signature over such a certificate cannot be verified here, so the certificate is never valid here.
     ///
     /// - parameters:
     ///     - principal: The principal that this certificate must be attesting to. Either the
@@ -293,6 +309,21 @@ extension NIOSSHCertifiedPublicKey {
         // Before we do any computation on values in this certificate, we first need to do the cryptographic
         // validation, to avoid the cryptographic doom principle. First, check if the signing key is in our allowed
         // set: second, validate the signature.
+        //
+        // A certificate that we read from the network may have been signed by a key of a kind, or with an
+        // algorithm, that we do not know. We cannot verify that signature, so we refuse the certificate whatever
+        // the caller allows. The signature check below would refuse it as well: we check first to say why.
+        if case .unknown = self.signatureKey.backingKey {
+            throw NIOSSHError.invalidCertificate(
+                diagnostics: "Certificate was signed by a key of an unknown kind and cannot be verified"
+            )
+        }
+        if case .unknown = self.signature.backingSignature {
+            throw NIOSSHError.invalidCertificate(
+                diagnostics: "Certificate was signed with an unknown algorithm and cannot be verified"
+            )
+        }
+
         guard allowedAuthoritySigningKeys.contains(self.signatureKey) else {
             throw NIOSSHError.invalidCertificate(
                 diagnostics: "Certificate was not signed by one of the allowed principals"
@@ -359,6 +390,8 @@ extension NIOSSHCertifiedPublicKey {
             return Self.p521KeyPrefix
         case .custom:
             preconditionFailure("base key cannot be of a custom kind")
+        case .unknown:
+            preconditionFailure("base key cannot be of an unknown kind")
         case .certified:
             preconditionFailure("base key cannot be certified")
         }
@@ -524,6 +557,12 @@ extension NIOSSHCertifiedPublicKey {
                 throw NIOSSHError.invalidCertificate(diagnostics: "Certificate may not be signed by custom key")
             }
 
+            // Nor can we name the certificate type of a key of an unknown kind, or write the key without its name.
+            // Such a key may have signed the certificate, though: that is the one place we read one.
+            if case .unknown = key.backingKey {
+                throw NIOSSHError.invalidCertificate(diagnostics: "Certificate may not use unknown key as public key")
+            }
+
             self.nonce = nonce
             self.serial = serial
             self.type = type
@@ -659,8 +698,8 @@ extension ByteBuffer {
                 let principals = rawPrincipals.readPrincipals(),
                 let criticalOptions = try rawCriticalOptions.readMapStringToString(),
                 let extensions = try rawExtensions.readMapStringToString(),
-                let signatureKey = try rawSignatureKey.readSSHHostKey(),
-                let signature = try rawSignature.readSSHSignature()
+                let signatureKey = try rawSignatureKey.readCertificateSignatureKey(),
+                let signature = try rawSignature.readCertificateSignature()
             else {
                 throw NIOSSHError.invalidSSHMessage(reason: "invalid encoding of certified key")
             }
@@ -679,6 +718,43 @@ extension ByteBuffer {
                 signatureKey: signatureKey,
                 signature: signature
             )
+        }
+    }
+
+    /// Reads the key that signed a certificate.
+    ///
+    /// A certificate authority may sign with a key of a kind that we do not know, such as an RSA key. That is no
+    /// reason to fail to read the certificate: the key it certifies is the one we use, and whoever wants to trust
+    /// the certificate may be able to verify it where we cannot. We keep such a signature key as its encoding.
+    private mutating func readCertificateSignatureKey() throws -> NIOSSHPublicKey? {
+        let encodedKey = self
+
+        do {
+            return try self.readSSHHostKey()
+        } catch let error as NIOSSHError where error.type == .unknownPublicKey {
+            // The key begins with the name of its format, or we would not have been told that the name is unknown.
+            var prefixBytes = encodedKey
+            guard let prefix = prefixBytes.readSSHStringAsString() else {
+                throw error
+            }
+
+            self.moveReaderIndex(to: self.writerIndex)
+            return NIOSSHPublicKey(backingKey: .unknown(prefix: prefix, encodedKey: encodedKey))
+        }
+    }
+
+    /// Reads the signature over a certificate.
+    ///
+    /// As with the key that made it, we keep a signature made with an algorithm that we do not know as its
+    /// encoding.
+    private mutating func readCertificateSignature() throws -> NIOSSHSignature? {
+        let encodedSignature = self
+
+        do {
+            return try self.readSSHSignature()
+        } catch let error as NIOSSHError where error.type == .unknownSignature {
+            self.moveReaderIndex(to: self.writerIndex)
+            return NIOSSHSignature(backingSignature: .unknown(encodedSignature))
         }
     }
 

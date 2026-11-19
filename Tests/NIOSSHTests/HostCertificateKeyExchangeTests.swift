@@ -59,6 +59,56 @@ struct ScriptedKeyExchangeServer {
         presenting hostKey: NIOSSHPublicKey,
         sign: (SHA256.Digest) throws -> NIOSSHSignature
     ) throws -> SSHMessage.KeyExchangeECDHReplyMessage {
+        var encodedHostKey = ByteBuffer()
+        encodedHostKey.writeSSHHostKey(hostKey)
+
+        let exchange = try self.exchange(
+            clientVersion: clientVersion,
+            clientMessage: clientMessage,
+            serverMessage: serverMessage,
+            keyExchangeInit: keyExchangeInit,
+            encodedHostKey: encodedHostKey
+        )
+        return .init(hostKey: hostKey, publicKey: exchange.publicKey, signature: try sign(exchange.exchangeHash))
+    }
+
+    /// Completes the exchange as ``reply(clientVersion:clientMessage:serverMessage:keyExchangeInit:presenting:sign:)``
+    /// does, presenting a host key that is given as its encoding. This is for a host key that ``NIOSSH`` may be
+    /// unable to read, or would not write as it is given.
+    ///
+    /// - returns: The encoding of the reply message.
+    func encodedReply(
+        clientVersion: String = Constants.version,
+        clientMessage: SSHMessage.KeyExchangeMessage,
+        serverMessage: SSHMessage.KeyExchangeMessage,
+        keyExchangeInit: SSHMessage.KeyExchangeECDHInitMessage,
+        presenting encodedHostKey: ByteBuffer,
+        sign: (SHA256.Digest) throws -> NIOSSHSignature
+    ) throws -> ByteBuffer {
+        let exchange = try self.exchange(
+            clientVersion: clientVersion,
+            clientMessage: clientMessage,
+            serverMessage: serverMessage,
+            keyExchangeInit: keyExchangeInit,
+            encodedHostKey: encodedHostKey
+        )
+        let signature = try sign(exchange.exchangeHash)
+
+        var reply = ByteBuffer()
+        reply.writeInteger(SSHMessage.KeyExchangeECDHReplyMessage.id)
+        reply.writeSSHString(encodedHostKey.readableBytesView)
+        reply.writeSSHString(exchange.publicKey.readableBytesView)
+        reply.writeCompositeSSHString { $0.writeSSHSignature(signature) }
+        return reply
+    }
+
+    private func exchange(
+        clientVersion: String,
+        clientMessage: SSHMessage.KeyExchangeMessage,
+        serverMessage: SSHMessage.KeyExchangeMessage,
+        keyExchangeInit: SSHMessage.KeyExchangeECDHInitMessage,
+        encodedHostKey: ByteBuffer
+    ) throws -> (publicKey: ByteBuffer, exchangeHash: SHA256.Digest) {
         let ephemeralKey = Curve25519.KeyAgreement.PrivateKey()
         let clientKey = try Curve25519.KeyAgreement.PublicKey(
             rawRepresentation: keyExchangeInit.publicKey.readableBytesView
@@ -70,19 +120,16 @@ struct ScriptedKeyExchangeServer {
         exchangeBytes.writeSSHString(self.version.utf8)
         exchangeBytes.writeCompositeSSHString { $0.writeSSHMessage(.keyExchange(clientMessage)) }
         exchangeBytes.writeCompositeSSHString { $0.writeSSHMessage(.keyExchange(serverMessage)) }
-        exchangeBytes.writeCompositeSSHString { $0.writeSSHHostKey(hostKey) }
+        exchangeBytes.writeSSHString(encodedHostKey.readableBytesView)
         exchangeBytes.writeSSHString(keyExchangeInit.publicKey.readableBytesView)
         exchangeBytes.writeSSHString(ephemeralKey.publicKey.rawRepresentation)
         sharedSecret.withUnsafeBytes { secretBytes in
             _ = exchangeBytes.writePositiveMPInt(secretBytes)
         }
 
-        let exchangeHash = SHA256.hash(data: exchangeBytes.readableBytesView)
-
-        return .init(
-            hostKey: hostKey,
-            publicKey: ByteBuffer(bytes: ephemeralKey.publicKey.rawRepresentation),
-            signature: try sign(exchangeHash)
+        return (
+            ByteBuffer(bytes: ephemeralKey.publicKey.rawRepresentation),
+            SHA256.hash(data: exchangeBytes.readableBytesView)
         )
     }
 }

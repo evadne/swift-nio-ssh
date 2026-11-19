@@ -334,6 +334,23 @@ extension ByteBuffer {
         buffer.writeSSHPacket(message: message, lengthEncrypted: true, blockSize: 8)
         return buffer
     }
+
+    /// A packet holding the encoding of a message, as ``PlaintextTransportProtection`` would send it. This is for
+    /// a message that ``NIOSSH`` would not write as it is given.
+    static func plaintextSSHPacket(encodedMessage: ByteBuffer) -> ByteBuffer {
+        // The packet is a multiple of eight bytes long, with at least four bytes of padding (RFC 4253 § 6).
+        var paddingLength = 8 - ((5 + encodedMessage.readableBytes) % 8)
+        if paddingLength < 4 {
+            paddingLength += 8
+        }
+
+        var buffer = ByteBuffer()
+        buffer.writeInteger(UInt32(1 + encodedMessage.readableBytes + paddingLength))
+        buffer.writeInteger(UInt8(paddingLength))
+        buffer.writeImmutableBuffer(encodedMessage)
+        buffer.writeRepeatingByte(0, count: paddingLength)
+        return buffer
+    }
 }
 
 extension BackToBackEmbeddedChannel {
@@ -381,7 +398,11 @@ final class ScriptedServer {
 
     let userEvents = UserEventExpecter()
 
-    let hostKey = NIOSSHPrivateKey(ed25519Key: .init())
+    var hostKey = NIOSSHPrivateKey(ed25519Key: .init())
+
+    /// The encoding of the host key to present, where that is not the public half of ``hostKey`` as ``NIOSSH``
+    /// writes it: a certificate for it, say.
+    var encodedHostKey: ByteBuffer?
 
     var keyExchange = ScriptedKeyExchangeServer(
         version: ScriptedServer.version,
@@ -466,15 +487,27 @@ final class ScriptedServer {
 
         try whileExchanging()
 
-        let reply = try self.keyExchange.reply(
-            clientVersion: self.clientVersion,
-            clientMessage: clientMessage,
-            serverMessage: serverMessage,
-            keyExchangeInit: keyExchangeInit,
-            presenting: self.hostKey.publicKey,
-            sign: { try self.hostKey.sign(digest: $0) }
-        )
-        try self.send(.keyExchangeReply(reply))
+        if let encodedHostKey = self.encodedHostKey {
+            let reply = try self.keyExchange.encodedReply(
+                clientVersion: self.clientVersion,
+                clientMessage: clientMessage,
+                serverMessage: serverMessage,
+                keyExchangeInit: keyExchangeInit,
+                presenting: encodedHostKey,
+                sign: { try self.hostKey.sign(digest: $0) }
+            )
+            try self.channel.writeInbound(ByteBuffer.plaintextSSHPacket(encodedMessage: reply))
+        } else {
+            let reply = try self.keyExchange.reply(
+                clientVersion: self.clientVersion,
+                clientMessage: clientMessage,
+                serverMessage: serverMessage,
+                keyExchangeInit: keyExchangeInit,
+                presenting: self.hostKey.publicKey,
+                sign: { try self.hostKey.sign(digest: $0) }
+            )
+            try self.send(.keyExchangeReply(reply))
+        }
         for message in beforeNewKeys {
             try self.send(message)
         }

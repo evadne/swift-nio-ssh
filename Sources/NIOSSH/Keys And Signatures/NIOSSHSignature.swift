@@ -45,6 +45,10 @@ extension NIOSSHSignature {
         // A signature made by a key of a custom kind: the name of the algorithm, and the bytes that follow it.
         case custom(algorithm: String, blob: ByteBuffer)
 
+        // A signature made with an algorithm that we do not know: the whole of its encoding. Only the signature
+        // over a certificate can be of this kind, and no key finds it valid.
+        case unknown(ByteBuffer)
+
         internal enum RawBytes {
             case byteBuffer(ByteBuffer)
             case data(Data)
@@ -91,7 +95,7 @@ extension NIOSSHSignature {
         switch self.backingSignature {
         case .custom(let algorithm, _):
             return algorithm
-        case .ed25519, .ecdsaP256, .ecdsaP384, .ecdsaP521:
+        case .ed25519, .ecdsaP256, .ecdsaP384, .ecdsaP521, .unknown:
             return nil
         }
     }
@@ -111,11 +115,14 @@ extension NIOSSHSignature.BackingSignature: Equatable {
             return lhs.rawRepresentation == rhs.rawRepresentation
         case (.custom(let lhsAlgorithm, let lhsBlob), .custom(let rhsAlgorithm, let rhsBlob)):
             return lhsAlgorithm == rhsAlgorithm && lhsBlob == rhsBlob
+        case (.unknown(let lhs), .unknown(let rhs)):
+            return lhs == rhs
         case (.ed25519, _),
             (.ecdsaP256, _),
             (.ecdsaP384, _),
             (.ecdsaP521, _),
-            (.custom, _):
+            (.custom, _),
+            (.unknown, _):
             return false
         }
     }
@@ -140,6 +147,9 @@ extension NIOSSHSignature.BackingSignature: Hashable {
             hasher.combine(4)
             hasher.combine(algorithm)
             hasher.combine(blob)
+        case .unknown(let encodedSignature):
+            hasher.combine(5)
+            hasher.combine(encodedSignature)
         }
     }
 }
@@ -161,6 +171,8 @@ extension ByteBuffer {
             var writtenLength = self.writeSSHString(algorithm.utf8)
             writtenLength += self.writeBuffer(&blob)
             return writtenLength
+        case .unknown(var encodedSignature):
+            return self.writeBuffer(&encodedSignature)
         }
     }
 

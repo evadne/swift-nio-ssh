@@ -106,6 +106,12 @@ public struct SSHClientConfiguration {
     /// ``NIOSSH`` proves only that the server holds the private key that the certificate certifies. It does
     /// **not** validate the certificate: the delegate is responsible for checking the certificate authority, the
     /// principals, the validity window and the critical options before it trusts the certificate.
+    ///
+    /// The certificate is passed to the delegate even when it was signed by a key of a kind, or with an algorithm,
+    /// that ``NIOSSH`` does not know, such as an RSA key.
+    /// ``NIOSSHCertifiedPublicKey/validate(principal:type:allowedAuthoritySigningKeys:acceptableCriticalOptions:)``
+    /// refuses such a certificate. A delegate that wants to trust it has to verify it itself, from the bytes that
+    /// `String(openSSHPublicKey:)` gives.
     public var advertiseHostCertificateAlgorithms: Bool = false
 
     /// The types of host key that this client accepts in addition to the Ed25519 and ECDSA keys that ``NIOSSH``
