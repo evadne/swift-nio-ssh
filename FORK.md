@@ -12,10 +12,8 @@ small series of patches on top. Apple's README and licence stand as they are.
 - The fork's own files are this one and `.gitlab-ci.yml`. They are not offered upstream.
 - Remotes in the working clone: `upstream` is Apple's repository, `origin` this fork on GitHub,
   `demeter` the GitLab instance that runs the fork's continuous integration.
-- The branch is pushed to `demeter` as changes are made. It is not pushed to `origin`: pushes to
-  GitHub are suspended, and the working clone's push address for `origin` is set to a value that
-  cannot be pushed to, until that is lifted. The branch is never force-pushed: a commit that has
-  been pushed is corrected by a commit after it.
+- The branch is pushed to both `demeter` and `origin` as changes are made. It is never
+  force-pushed: a commit that has been pushed is corrected by a commit after it.
 - Nothing is offered to Apple from this branch as it stands. A pull request to Apple is raised
   only on the operator's approval, as a separate process, which may need a small branch
   prepared for the purpose from Apple's `main`.
