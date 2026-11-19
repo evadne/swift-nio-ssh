@@ -272,6 +272,10 @@ extension NIOSSHHandler: ChannelDuplexHandler {
                     } catch {
                         context.fireErrorCaught(error)
                     }
+
+                    // If that was our NEWKEYS and it ended a rekey, the global requests that were waiting for the
+                    // rekey can be sent. Nothing else will send them before the peer next sends us something.
+                    self.sendGlobalRequestsIfPossible()
                 case .success(.none):
                     // Do nothing
                     break

@@ -367,4 +367,52 @@ final class GlobalRequestTests: XCTestCase {
         XCTAssertEqual(try server.clientMessages(), [.newKeys, .requestFailure])
         XCTAssertNoThrow(try server.channel.throwIfErrorCaught())
     }
+
+    func testRequestsSentDuringARekeyAreSentAfterIt() throws {
+        let server = try self.makeAuthenticatedScriptedServer()
+        let handler = try server.channel.pipeline.syncOperations.handler(type: NIOSSHHandler.self)
+        let request = SSHMessage.globalRequest(Self.keepalive)
+
+        let replyResult = NIOLoopBoundBox<Result<ByteBuffer?, Error>?>(nil, eventLoop: server.channel.eventLoop)
+        let reply = server.channel.eventLoop.makePromise(of: ByteBuffer?.self)
+        reply.futureResult.whenComplete { replyResult.value = $0 }
+        XCTAssertNoThrow(
+            try server.exchangeKeys(whileExchanging: {
+                handler.sendGlobalRequest(name: "keepalive@openssh.com", wantReply: true, promise: reply)
+                try server.channel.throwIfErrorCaught()
+                XCTAssertEqual(try server.clientMessages(), [])
+            })
+        )
+        XCTAssertEqual(try server.clientMessages(), [.newKeys, request])
+
+        XCTAssertNoThrow(try server.send(.requestSuccess(.init(buffer: ByteBuffer()))))
+        XCTAssertEqual(try XCTUnwrap(replyResult.value).get(), ByteBuffer())
+    }
+
+    func testRequestsSentBeforeOurNewKeysAreSentAfterThem() throws {
+        let hostKeys = HoldableHostKeysDelegate()
+        let server = try self.makeAuthenticatedScriptedServer { $0.serverAuthDelegate = hostKeys }
+        let handler = try server.channel.pipeline.syncOperations.handler(type: NIOSSHHandler.self)
+        let request = SSHMessage.globalRequest(Self.keepalive)
+
+        // The server has sent its new keys message, and the client is still asking its delegate about the host key.
+        hostKeys.hold = true
+        XCTAssertNoThrow(try server.exchangeKeys())
+        XCTAssertEqual(hostKeys.promises.count, 1)
+
+        let replyResult = NIOLoopBoundBox<Result<ByteBuffer?, Error>?>(nil, eventLoop: server.channel.eventLoop)
+        let reply = server.channel.eventLoop.makePromise(of: ByteBuffer?.self)
+        reply.futureResult.whenComplete { replyResult.value = $0 }
+        handler.sendGlobalRequest(name: "keepalive@openssh.com", wantReply: true, promise: reply)
+        XCTAssertNoThrow(try server.channel.throwIfErrorCaught())
+        XCTAssertEqual(try server.clientMessages(), [])
+
+        // The key exchange ends when the client sends its new keys message, and the request must not wait for the
+        // server to send something first: the server may have nothing to send.
+        hostKeys.promises[0].succeed(())
+        XCTAssertEqual(try server.clientMessages(), [.newKeys, request])
+
+        XCTAssertNoThrow(try server.send(.requestSuccess(.init(buffer: ByteBuffer()))))
+        XCTAssertEqual(try XCTUnwrap(replyResult.value).get(), ByteBuffer())
+    }
 }
