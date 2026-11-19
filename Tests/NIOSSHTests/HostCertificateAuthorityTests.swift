@@ -13,6 +13,7 @@
 //===----------------------------------------------------------------------===//
 
 import Crypto
+import Dispatch
 import Foundation
 import NIOCore
 import NIOEmbedded
@@ -65,6 +66,12 @@ private enum Fixtures {
             NIOSSHPrivateKey(ed25519Key: try .init(rawRepresentation: Data(base64Encoded: Self.hostKeySeed)!))
         }
     }
+}
+
+/// What a thread made of the work that it was given.
+private final class ThreadOutcome<Value: Sendable>: @unchecked Sendable {
+    // The thread writes this once, before it says that it has finished. Nothing reads it until then.
+    var result: Result<Value, any Error>?
 }
 
 final class HostCertificateAuthorityTests: XCTestCase {
@@ -643,6 +650,231 @@ final class HostCertificateAuthorityTests: XCTestCase {
         XCTAssertEqual(read, NIOSSHPublicKey(changed))
         XCTAssertEqual(read.hashValue, NIOSSHPublicKey(changed).hashValue)
         XCTAssertNotEqual(self.encoding(of: read), self.encoding(of: NIOSSHPublicKey(changed)))
+    }
+
+    // MARK: Certificates that name a certificate as the key that signed them
+
+    /// How many certificates stand below the first in a certificate that is nested deeply, each the signature key
+    /// of the one above it. This many of the certificates that these tests write fit in one packet that a server
+    /// may send before the first key exchange has completed, as the test of key exchange below shows.
+    private static let deepNesting = 900
+
+    /// Runs `body` on a thread of its own and waits for it.
+    ///
+    /// The thread has a stack of half a megabyte, which is what macOS gives to a thread other than the main one
+    /// that asks for nothing else. The event loops of NIOPosix run on such threads there, and so do the queues of
+    /// Dispatch. That is the stack with which a client reads what a server sends, and the main thread of a test
+    /// has many times more.
+    private func onSecondaryThread<Value: Sendable>(
+        _ body: @escaping @Sendable () throws -> Value
+    ) throws -> Value {
+        let outcome = ThreadOutcome<Value>()
+        let finished = DispatchSemaphore(value: 0)
+        let thread = Thread {
+            outcome.result = Result { try body() }
+            finished.signal()
+        }
+        thread.stackSize = 512 * 1024
+        thread.start()
+        finished.wait()
+        return try XCTUnwrap(outcome.result).get()
+    }
+
+    /// The encoding of a host certificate for `hostKey` that names a certificate as the key that signed it, which
+    /// names a certificate in turn, until `depth` certificates stand below the first. The last of them names a key
+    /// of a built-in kind.
+    private func encodedHostCertificate(
+        for hostKey: NIOSSHPrivateKey,
+        signedByCertificatesNested depth: Int
+    ) throws -> ByteBuffer {
+        let authority = NIOSSHPrivateKey(ed25519Key: .init())
+        var signature = ByteBuffer()
+        signature.writeSSHSignature(try authority.sign(digest: SHA256.hash(data: [1, 2, 3])))
+
+        var encoded = self.encodedHostCertificate(
+            for: hostKey,
+            signatureKey: self.encoding(of: authority.publicKey),
+            signature: signature
+        )
+        for _ in 0..<depth {
+            encoded = self.encodedHostCertificate(for: hostKey, signatureKey: encoded, signature: signature)
+        }
+        return encoded
+    }
+
+    /// The encoding of what says that it is a key of the format `name`, and is followed by `bytes`.
+    private func encodedKey(named name: String, followedBy bytes: [UInt8]) -> ByteBuffer {
+        var buffer = ByteBuffer()
+        buffer.writeSSHString(name.utf8)
+        buffer.writeBytes(bytes)
+        return buffer
+    }
+
+    func testCertificateSignedByACertificateIsRejected() throws {
+        let hostKey = NIOSSHPrivateKey(ed25519Key: .init())
+
+        for depth in [1, 2, 16] {
+            let encoded = try self.encodedHostCertificate(for: hostKey, signedByCertificatesNested: depth)
+            var bytes = encoded
+            XCTAssertThrowsError(try bytes.readSSHHostKey(), "nested \(depth) deep") { error in
+                XCTAssertEqual((error as? NIOSSHError)?.type, .invalidCertificate)
+            }
+            XCTAssertEqual(bytes, encoded)
+
+            // An application reads a key that it has kept through the same reader.
+            let openSSHPublicKey =
+                "ssh-ed25519-cert-v01@openssh.com " + Data(encoded.readableBytesView).base64EncodedString()
+            XCTAssertThrowsError(try NIOSSHPublicKey(openSSHPublicKey: openSSHPublicKey), "nested \(depth) deep") {
+                error in
+                XCTAssertEqual((error as? NIOSSHError)?.type, .invalidCertificate)
+            }
+        }
+    }
+
+    func testCertificateSignedByACertificateIsRejectedByTheNameOfItsFormat() throws {
+        let hostKey = NIOSSHPrivateKey(ed25519Key: .init())
+
+        let certificateFormats = [
+            // The certificates that NIOSSH reads.
+            "ssh-ed25519-cert-v01@openssh.com",
+            "ecdsa-sha2-nistp256-cert-v01@openssh.com",
+            "ecdsa-sha2-nistp384-cert-v01@openssh.com",
+            "ecdsa-sha2-nistp521-cert-v01@openssh.com",
+            // Certificates for keys of kinds that NIOSSH does not know. It could only have kept one as its bytes.
+            "ssh-rsa-cert-v01@openssh.com",
+            "sk-ssh-ed25519-cert-v01@openssh.com",
+            "sk-ecdsa-sha2-nistp256-cert-v01@openssh.com",
+            "unknown-cert-v01@openssh.com",
+        ]
+
+        // Nothing of the signature key is read once its name says that it is a certificate, so it does not matter
+        // that no certificate follows the name here.
+        for format in certificateFormats {
+            for rest in [[], [1, 2, 3, 4]] as [[UInt8]] {
+                let encoded = self.encodedHostCertificate(
+                    for: hostKey,
+                    signatureKey: self.encodedKey(named: format, followedBy: rest)
+                )
+                var bytes = encoded
+                XCTAssertThrowsError(try bytes.readSSHHostKey(), format) { error in
+                    XCTAssertEqual((error as? NIOSSHError)?.type, .invalidCertificate, format)
+                }
+                XCTAssertEqual(bytes, encoded)
+            }
+        }
+
+        // A key of an unknown kind is still read where its name only resembles that of a certificate.
+        for format in ["unknown-cert-v01@example.com", "ssh-rsa-cert-v01@openssh.com.example.com", "cert-v01"] {
+            let signatureKey = self.encodedKey(named: format, followedBy: [1, 2, 3, 4])
+            let encoded = self.encodedHostCertificate(for: hostKey, signatureKey: signatureKey)
+            var bytes = encoded
+            let certificate = try XCTUnwrap(NIOSSHCertifiedPublicKey(try XCTUnwrap(try bytes.readSSHHostKey())))
+            XCTAssertEqual(self.encoding(of: certificate.signatureKey), signatureKey, format)
+            XCTAssertEqual(self.encoding(of: NIOSSHPublicKey(certificate)), encoded, format)
+        }
+    }
+
+    func testHostCertificateSignedByACertificateIsRejectedInKeyExchange() throws {
+        let hostKey = NIOSSHPrivateKey(ed25519Key: .init())
+
+        for presented in [
+            try self.encodedHostCertificate(for: hostKey, signedByCertificatesNested: 1),
+            self.encodedHostCertificate(
+                for: hostKey,
+                signatureKey: try self.encoding(ofOpenSSHPublicKey: Fixtures.signedWithECDSA)
+            ),
+            self.encodedHostCertificate(
+                for: hostKey,
+                signatureKey: self.encodedKey(named: "ssh-rsa-cert-v01@openssh.com", followedBy: [1, 2, 3, 4])
+            ),
+        ] {
+            let delegate = RecordingHostKeysDelegate()
+            XCTAssertThrowsError(
+                try self.exchangeKeys(presenting: presented, signingWith: hostKey, delegate: delegate)
+            ) { error in
+                XCTAssertEqual((error as? NIOSSHError)?.type, .invalidCertificate)
+            }
+            XCTAssertEqual(delegate.hostKeys, [])
+        }
+    }
+
+    func testHostCertificateSignedByCertificatesNestedDeeplyIsRejectedInKeyExchange() throws {
+        let hostKey = NIOSSHPrivateKey(ed25519Key: .init())
+        let presented = try self.encodedHostCertificate(for: hostKey, signedByCertificatesNested: Self.deepNesting)
+
+        // A client reads the host key before it looks at what was negotiated, so this reaches a client that
+        // offered no certificate algorithm as it reaches one that did.
+        for advertiseHostCertificateAlgorithms in [false, true] {
+            let (error, hostKeysShown) = try self.onSecondaryThread { () -> ((any Error)?, Int) in
+                let delegate = RecordingHostKeysDelegate()
+                let server = try ScriptedServer {
+                    $0.serverAuthDelegate = delegate
+                    $0.advertiseHostCertificateAlgorithms = advertiseHostCertificateAlgorithms
+                }
+                server.hostKey = hostKey
+                server.encodedHostKey = presented
+                server.keyExchange.hostKeyAlgorithms = ["ssh-ed25519-cert-v01@openssh.com", "ssh-ed25519"]
+
+                let clientMessage = try server.exchangeVersions()
+                do {
+                    try server.exchangeKeys(clientMessage: clientMessage)
+                    return (nil, delegate.hostKeys.count)
+                } catch {
+                    return (error, delegate.hostKeys.count)
+                }
+            }
+
+            // The certificate is refused for what it is. It was not too long to be sent.
+            XCTAssertEqual((error as? NIOSSHError)?.type, .invalidCertificate, "\(String(describing: error))")
+            XCTAssertEqual(hostKeysShown, 0)
+        }
+    }
+
+    func testMessagesWithACertificateSignedByCertificatesNestedDeeplyAreRejected() throws {
+        let hostKey = NIOSSHPrivateKey(ed25519Key: .init())
+        let nested = try self.encodedHostCertificate(for: hostKey, signedByCertificatesNested: Self.deepNesting)
+        var signature = ByteBuffer()
+        signature.writeSSHSignature(try hostKey.sign(digest: SHA256.hash(data: [1, 2, 3])))
+
+        // The messages in which a peer sends a public key. A server sends the first and the last of them to a
+        // client, and a client the second to a server. Each is read as soon as it arrives, whatever the state of
+        // the connection.
+        var keyExchangeReply = ByteBuffer()
+        keyExchangeReply.writeInteger(SSHMessage.KeyExchangeECDHReplyMessage.id)
+        keyExchangeReply.writeSSHString(nested.readableBytesView)
+        keyExchangeReply.writeSSHString(Array(repeating: UInt8(1), count: 32))
+        keyExchangeReply.writeSSHString(signature.readableBytesView)
+
+        var userAuthRequest = ByteBuffer()
+        userAuthRequest.writeInteger(SSHMessage.UserAuthRequestMessage.id)
+        userAuthRequest.writeSSHString("user".utf8)
+        userAuthRequest.writeSSHString("ssh-connection".utf8)
+        userAuthRequest.writeSSHString("publickey".utf8)
+        userAuthRequest.writeSSHBoolean(false)
+        userAuthRequest.writeSSHString("ssh-ed25519".utf8)
+        userAuthRequest.writeSSHString(nested.readableBytesView)
+
+        var userAuthPKOK = ByteBuffer()
+        userAuthPKOK.writeInteger(SSHMessage.UserAuthPKOKMessage.id)
+        userAuthPKOK.writeSSHString("ssh-ed25519".utf8)
+        userAuthPKOK.writeSSHString(nested.readableBytesView)
+
+        for message in [keyExchangeReply, userAuthRequest, userAuthPKOK] {
+            let error = try self.onSecondaryThread { () -> (any Error)? in
+                var bytes = message
+                do {
+                    _ = try bytes.readSSHMessage()
+                    return nil
+                } catch {
+                    return error
+                }
+            }
+            XCTAssertEqual(
+                (error as? NIOSSHError)?.type,
+                .invalidCertificate,
+                "message \(message.getInteger(at: message.readerIndex, as: UInt8.self)!): \(String(describing: error))"
+            )
+        }
     }
 
     /// The encoding of a host certificate for `hostKey`, written by hand so that it can hold what ``NIOSSH`` does

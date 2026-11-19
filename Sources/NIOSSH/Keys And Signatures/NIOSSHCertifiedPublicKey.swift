@@ -204,7 +204,8 @@ public struct NIOSSHCertifiedPublicKey {
     /// The public key corresponding to the private key used to sign this ``NIOSSHCertifiedPublicKey``.
     ///
     /// For a certificate that was read from the network this may be a key of a kind that SwiftNIO SSH does not know.
-    /// Such a key can be compared and written, and it verifies nothing.
+    /// Such a key can be compared and written, and it verifies nothing. It is never a certificate: a certificate
+    /// that names another certificate as the key that signed it is not read.
     public var signatureKey: NIOSSHPublicKey {
         get {
             self.backing.signatureKey
@@ -428,6 +429,22 @@ extension NIOSSHCertifiedPublicKey {
         } else {
             throw NIOSSHError.unknownPublicKey(algorithm: String(decoding: prefix, as: UTF8.self))
         }
+    }
+
+    /// How the name of every certificate format that OpenSSH defines ends.
+    static let certificateKeyPrefixSuffix = "-cert-v01@openssh.com".utf8
+
+    /// Whether `prefix` is the name of a certificate format: of one that we read, or of any other that is named as
+    /// OpenSSH names them, which is a certificate for a key of a kind that we do not know.
+    internal static func isCertificateKeyPrefix<Bytes: BidirectionalCollection>(_ prefix: Bytes) -> Bool
+    where Bytes.Element == UInt8 {
+        // We read a certificate exactly when its format has a base key format, so this is what has to be asked of
+        // the formats that we know. It stays right when a format is added there.
+        if (try? Self.baseKeyPrefixForKeyPrefix(prefix)) != nil {
+            return true
+        }
+
+        return prefix.suffix(Self.certificateKeyPrefixSuffix.count).elementsEqual(Self.certificateKeyPrefixSuffix)
     }
 }
 
@@ -772,20 +789,34 @@ extension ByteBuffer {
     /// A certificate authority may sign with a key of a kind that we do not know, such as an RSA key. That is no
     /// reason to fail to read the certificate: the key it certifies is the one we use, and whoever wants to trust
     /// the certificate may be able to verify it where we cannot. We keep such a signature key as its encoding.
+    ///
+    /// A certificate is signed by a plain key, and never by another certificate. We refuse a signature key that is
+    /// a certificate by the name of its format, before we read anything else of it, whether or not we know the kind
+    /// of key that it certifies.
     private mutating func readCertificateSignatureKey() throws -> NIOSSHPublicKey? {
         let encodedKey = self
+
+        // The key begins with the name of its format.
+        var prefixBytes = encodedKey
+        guard let prefix = prefixBytes.readSSHString() else {
+            return nil
+        }
+
+        // This check is _very important_. To read a certificate is to read the key that signed it, so if that key
+        // could be a certificate we would read the key that signed that one in turn, and so on for as many
+        // certificates as the peer chose to put inside one another: it could have us run out of stack. With this
+        // check, reading a signature key never reads another certificate.
+        guard !NIOSSHCertifiedPublicKey.isCertificateKeyPrefix(prefix.readableBytesView) else {
+            throw NIOSSHError.invalidCertificate(diagnostics: "Certificate may not be signed by certified key")
+        }
 
         do {
             return try self.readSSHHostKey()
         } catch let error as NIOSSHError where error.type == .unknownPublicKey {
-            // The key begins with the name of its format, or we would not have been told that the name is unknown.
-            var prefixBytes = encodedKey
-            guard let prefix = prefixBytes.readSSHStringAsString() else {
-                throw error
-            }
-
             self.moveReaderIndex(to: self.writerIndex)
-            return NIOSSHPublicKey(backingKey: .unknown(prefix: prefix, encodedKey: encodedKey))
+            return NIOSSHPublicKey(
+                backingKey: .unknown(prefix: String(buffer: prefix), encodedKey: encodedKey)
+            )
         }
     }
 
