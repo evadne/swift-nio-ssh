@@ -1,0 +1,31 @@
+# Continuous integration for the fork carried by Looking Glass, on the operator's GitLab.
+# This file is the fork's own and is not offered upstream; Apple's package is tested by
+# the workflows under .github/, which this file does not replace.
+#
+# Every job runs the package's own tests, unchanged, on Linux with the Swift toolchain
+# named in the image. A failure of any test fails the pipeline.
+
+stages:
+  - test
+
+.swift:
+  stage: test
+  image: swift:6.4
+  before_script:
+    - swift --version
+  cache:
+    key: "$CI_JOB_NAME-$CI_COMMIT_REF_SLUG"
+    paths:
+      - .build/repositories
+
+test:debug:
+  extends: .swift
+  script:
+    - swift build --build-tests -Xswiftc -warnings-as-errors
+    - swift test --skip-build
+
+test:release:
+  extends: .swift
+  script:
+    - swift build -c release --build-tests -Xswiftc -warnings-as-errors
+    - swift test -c release --skip-build
