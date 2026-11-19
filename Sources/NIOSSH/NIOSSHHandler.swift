@@ -399,11 +399,56 @@ extension NIOSSHHandler {
         let responsePromise: EventLoopPromise<GlobalRequest.TCPForwardingResponse>
 
         switch message.type {
-        case .unknown:
-            if message.wantReply {
-                // There's no way to tell what message this is and how to respond from here.
-                // The only reasonable solution is to reply `SSH_MSG_REQUEST_FAILURE`
-                try self.writeMessage(.init(.requestFailure), context: context)
+        case .unknown(let name, let data):
+            // We can't tell what this request is or how to respond to it, but the delegate may be able to.
+            let unknownResponsePromise = context.eventLoop.makePromise(of: ByteBuffer?.self)
+
+            // The promise is created on the context's event loop, so this is safe.
+            unknownResponsePromise.futureResult.assumeIsolatedUnsafeUnchecked().whenComplete { result in
+                guard message.wantReply else {
+                    // Nothing to do.
+                    return
+                }
+
+                do {
+                    switch result {
+                    case .success(let responseData):
+                        try self.writeMessage(
+                            .init(
+                                .requestSuccess(
+                                    .init(.unknown(responseData ?? ByteBuffer()), allocator: context.channel.allocator)
+                                )
+                            ),
+                            context: context
+                        )
+                        context.flush()
+                    case .failure:
+                        // We don't care why, we just say no.
+                        try self.writeMessage(.init(.requestFailure), context: context)
+                        context.flush()
+                    }
+                } catch {
+                    context.fireErrorCaught(error)
+                }
+            }
+
+            switch self.stateMachine.role {
+            case .client(let config):
+                config.globalRequestDelegate.unknownGlobalRequest(
+                    name: name,
+                    data: data,
+                    wantReply: message.wantReply,
+                    handler: self,
+                    promise: unknownResponsePromise
+                )
+            case .server(let config):
+                config.globalRequestDelegate.unknownGlobalRequest(
+                    name: name,
+                    data: data,
+                    wantReply: message.wantReply,
+                    handler: self,
+                    promise: unknownResponsePromise
+                )
             }
             return
         case .tcpipForward(let host, let port):

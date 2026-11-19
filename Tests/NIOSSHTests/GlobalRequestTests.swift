@@ -19,10 +19,40 @@ import XCTest
 @testable import NIOSSH
 
 final class GlobalRequestTests: XCTestCase {
+    /// A delegate that records the requests ``NIOSSH`` does not know, and answers them as it is told to.
+    private final class RecordingGlobalRequestDelegate: GlobalRequestDelegate {
+        struct Refused: Error {}
+
+        struct Request: Equatable {
+            var name: String
+            var data: ByteBuffer
+            var wantReply: Bool
+        }
+
+        var requests: [Request] = []
+
+        var answer: Result<ByteBuffer?, Error> = .failure(Refused())
+
+        func unknownGlobalRequest(
+            name: String,
+            data: ByteBuffer,
+            wantReply: Bool,
+            handler: NIOSSHHandler,
+            promise: EventLoopPromise<ByteBuffer?>
+        ) {
+            self.requests.append(.init(name: name, data: data, wantReply: wantReply))
+            promise.completeWith(self.answer)
+        }
+    }
+
     /// A client that has authenticated with a real server, whose part the test plays from here on.
-    private func makeAuthenticatedChannel() throws -> BackToBackEmbeddedChannel {
+    private func makeAuthenticatedChannel(
+        globalRequestDelegate: GlobalRequestDelegate? = nil
+    ) throws -> BackToBackEmbeddedChannel {
         let channel = BackToBackEmbeddedChannel()
-        try channel.configureWithHarness(.scriptable())
+        var harness = TestHarness.scriptable()
+        harness.clientGlobalRequestDelegate = globalRequestDelegate
+        try channel.configureWithHarness(harness)
         try channel.activate()
         try channel.interactInMemory()
         return channel
@@ -111,5 +141,79 @@ final class GlobalRequestTests: XCTestCase {
             return XCTFail("Expected the request to have failed, got \(String(describing: result.value))")
         }
         XCTAssertNotEqual((error as? NIOSSHError)?.type, .globalRequestRefused)
+    }
+
+    func testUnknownRequestsAreRefusedByDefault() throws {
+        let channel = try self.makeAuthenticatedChannel()
+
+        XCTAssertNoThrow(
+            try channel.sendFromScriptedServer(
+                .globalRequest(.init(wantReply: true, type: .unknown("keepalive@openssh.com", ByteBuffer())))
+            )
+        )
+        XCTAssertEqual(try channel.messagesForScriptedServer(), [.requestFailure])
+
+        // A request that wants no reply gets none.
+        XCTAssertNoThrow(
+            try channel.sendFromScriptedServer(
+                .globalRequest(.init(wantReply: false, type: .unknown("hostkeys-00@openssh.com", ByteBuffer())))
+            )
+        )
+        XCTAssertEqual(try channel.messagesForScriptedServer(), [])
+    }
+
+    func testUnknownRequestsAreGivenToTheDelegate() throws {
+        let delegate = RecordingGlobalRequestDelegate()
+        let channel = try self.makeAuthenticatedChannel(globalRequestDelegate: delegate)
+        let hostKeys = ByteBuffer(bytes: [0, 0, 0, 3, 1, 2, 3])
+
+        XCTAssertNoThrow(
+            try channel.sendFromScriptedServer(
+                .globalRequest(.init(wantReply: false, type: .unknown("hostkeys-00@openssh.com", hostKeys)))
+            )
+        )
+        XCTAssertEqual(delegate.requests, [.init(name: "hostkeys-00@openssh.com", data: hostKeys, wantReply: false)])
+
+        // The delegate refused, but the peer did not want to know.
+        XCTAssertEqual(try channel.messagesForScriptedServer(), [])
+    }
+
+    func testTheDelegateAnswersUnknownRequests() throws {
+        let delegate = RecordingGlobalRequestDelegate()
+        let channel = try self.makeAuthenticatedChannel(globalRequestDelegate: delegate)
+        let request = SSHMessage.globalRequest(
+            .init(wantReply: true, type: .unknown("example@example.com", ByteBuffer()))
+        )
+
+        delegate.answer = .success(ByteBuffer(bytes: [42]))
+        XCTAssertNoThrow(try channel.sendFromScriptedServer(request))
+        XCTAssertEqual(
+            try channel.messagesForScriptedServer(),
+            [.requestSuccess(.init(buffer: ByteBuffer(bytes: [42])))]
+        )
+
+        delegate.answer = .success(nil)
+        XCTAssertNoThrow(try channel.sendFromScriptedServer(request))
+        XCTAssertEqual(try channel.messagesForScriptedServer(), [.requestSuccess(.init(buffer: ByteBuffer()))])
+
+        delegate.answer = .failure(RecordingGlobalRequestDelegate.Refused())
+        XCTAssertNoThrow(try channel.sendFromScriptedServer(request))
+        XCTAssertEqual(try channel.messagesForScriptedServer(), [.requestFailure])
+
+        XCTAssertEqual(delegate.requests.count, 3)
+        XCTAssertEqual(delegate.requests.map { $0.wantReply }, [true, true, true])
+    }
+
+    func testRequestsThatAreKnownAreNotGivenToTheDelegateAsUnknown() throws {
+        let delegate = RecordingGlobalRequestDelegate()
+        let channel = try self.makeAuthenticatedChannel(globalRequestDelegate: delegate)
+
+        XCTAssertNoThrow(
+            try channel.sendFromScriptedServer(
+                .globalRequest(.init(wantReply: true, type: .tcpipForward("localhost", 22)))
+            )
+        )
+        XCTAssertEqual(try channel.messagesForScriptedServer(), [.requestFailure])
+        XCTAssertEqual(delegate.requests, [])
     }
 }

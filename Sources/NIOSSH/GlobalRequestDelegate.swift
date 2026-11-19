@@ -32,6 +32,48 @@ public protocol GlobalRequestDelegate {
         handler: NIOSSHHandler,
         promise: EventLoopPromise<GlobalRequest.TCPForwardingResponse>
     )
+
+    /// The peer has sent a global request of a type that ``NIOSSH`` does not know.
+    ///
+    /// SSH is extended with global requests whose names end in a domain, such as `hostkeys-00@openssh.com`, with
+    /// which an OpenSSH server tells a client of all its host keys. This method lets an application take part in
+    /// such extensions.
+    ///
+    /// If the peer asked for a reply, succeeding `promise` accepts the request, with the request-specific data
+    /// of the reply if there is any, and failing `promise` refuses it. Requests must be replied to in the order
+    /// in which they arrive (RFC 4254 § 4), so `promise` should be completed before this method returns. If the
+    /// peer did not ask for a reply, `promise` must still be completed, and nothing is sent.
+    ///
+    /// The eventLoop associated with the promise passed in must be the same as the one used to create the handler.
+    ///
+    /// The default implementation refuses all requests.
+    ///
+    /// - parameters:
+    ///     - name: The name of the request.
+    ///     - data: The request-specific data that follows the name, which may be empty.
+    ///     - wantReply: Whether the peer asked for a reply.
+    ///     - handler: The handler that received the request.
+    ///     - promise: An `EventLoopPromise` to be completed as described above.
+    func unknownGlobalRequest(
+        name: String,
+        data: ByteBuffer,
+        wantReply: Bool,
+        handler: NIOSSHHandler,
+        promise: EventLoopPromise<ByteBuffer?>
+    )
+}
+
+extension GlobalRequestDelegate {
+    public func unknownGlobalRequest(
+        name: String,
+        data: ByteBuffer,
+        wantReply: Bool,
+        handler: NIOSSHHandler,
+        promise: EventLoopPromise<ByteBuffer?>
+    ) {
+        // The default implementation rejects all requests.
+        promise.fail(NIOSSHError.unsupportedGlobalRequest)
+    }
 }
 
 extension GlobalRequestDelegate {
