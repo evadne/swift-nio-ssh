@@ -482,11 +482,175 @@ final class HostCertificateAuthorityTests: XCTestCase {
         }
     }
 
+    // MARK: Certificates that NIOSSH would encode differently
+
+    /// The encodings of host certificates for `hostKey` whose fields ``NIOSSH`` reads, and which it would not write
+    /// from those fields as they are. Each names a key of a built-in kind as the one that signed it.
+    private func hostCertificatesEncodedDifferently(for hostKey: NIOSSHPrivateKey) throws -> [ByteBuffer] {
+        let authority = NIOSSHPrivateKey(ed25519Key: .init())
+        let signatureKey = self.encoding(of: authority.publicKey)
+        var signature = ByteBuffer()
+        signature.writeSSHSignature(try authority.sign(digest: SHA256.hash(data: [1, 2, 3])))
+
+        return [
+            // A key ID that is not UTF-8: "Zoë" in ISO 8859-1.
+            self.encodedHostCertificate(
+                for: hostKey,
+                keyID: [0x5A, 0x6F, 0xEB],
+                signatureKey: signatureKey,
+                signature: signature
+            ),
+            // Extensions that are not in order, and an extension that is named twice.
+            self.encodedHostCertificate(
+                for: hostKey,
+                extensions: ["b", "a"],
+                signatureKey: signatureKey,
+                signature: signature
+            ),
+            self.encodedHostCertificate(
+                for: hostKey,
+                extensions: ["a", "a"],
+                signatureKey: signatureKey,
+                signature: signature
+            ),
+            // A reserved field that is not empty.
+            self.encodedHostCertificate(
+                for: hostKey,
+                reserved: [1, 2, 3],
+                signatureKey: signatureKey,
+                signature: signature
+            ),
+        ]
+    }
+
+    func testKeyExchangeWithHostCertificateThatWouldBeEncodedDifferently() throws {
+        let hostKey = NIOSSHPrivateKey(ed25519Key: .init())
+
+        for presented in try self.hostCertificatesEncodedDifferently(for: hostKey) {
+            let delegate = RecordingHostKeysDelegate()
+
+            // The server signs an exchange hash that covers its host key as it presented it.
+            let sent = try self.exchangeKeys(presenting: presented, signingWith: hostKey, delegate: delegate)
+
+            XCTAssertEqual(sent.first, .newKeys)
+            XCTAssertEqual(delegate.hostKeys.count, 1)
+            let presentedHostKey = try XCTUnwrap(delegate.hostKeys.first)
+            XCTAssertEqual(self.encoding(of: presentedHostKey), presented)
+            XCTAssertEqual(
+                String(openSSHPublicKey: presentedHostKey),
+                "ssh-ed25519-cert-v01@openssh.com " + Data(presented.readableBytesView).base64EncodedString()
+            )
+        }
+    }
+
+    func testCertificateIsWrittenAsItWasRead() throws {
+        let hostKey = NIOSSHPrivateKey(ed25519Key: .init())
+
+        for encoded in try self.hostCertificatesEncodedDifferently(for: hostKey) {
+            var bytes = encoded
+            let key = try XCTUnwrap(try bytes.readSSHHostKey())
+            XCTAssertEqual(bytes.readableBytes, 0)
+            XCTAssertEqual(self.encoding(of: key), encoded)
+
+            // Whatever else is in the buffer it was read from, and wherever it is written.
+            var surrounded = ByteBuffer(bytes: [1, 2, 3])
+            surrounded.writeImmutableBuffer(encoded)
+            surrounded.writeBytes([4, 5, 6])
+            surrounded.moveReaderIndex(forwardBy: 3)
+            let surroundedKey = try XCTUnwrap(try surrounded.readSSHHostKey())
+            XCTAssertEqual(surrounded.readableBytes, 3)
+
+            var written = ByteBuffer(bytes: [7, 8, 9])
+            XCTAssertEqual(written.writeSSHHostKey(surroundedKey), encoded.readableBytes)
+            written.moveReaderIndex(forwardBy: 3)
+            XCTAssertEqual(written, encoded)
+        }
+    }
+
+    func testCertificateWithAnyByteChangedIsWrittenAsItWasReadIfItIsRead() throws {
+        // Whatever a peer sends, a certificate that is read at all is written as the bytes it was read from.
+        for fixture in [Fixtures.signedWithRSASHA512, Fixtures.signedWithECDSA] {
+            let encoded = try self.encoding(ofOpenSSHPublicKey: fixture)
+            var read = 0
+
+            for index in encoded.readerIndex..<encoded.writerIndex {
+                for mask in [UInt8(0x01), 0x80, 0xFF] {
+                    var changed = encoded
+                    changed.setInteger(encoded.getInteger(at: index, as: UInt8.self)! ^ mask, at: index)
+
+                    var bytes = changed
+                    guard let key = try? bytes.readSSHHostKey() else {
+                        continue
+                    }
+                    read += 1
+
+                    let consumed = changed.getSlice(
+                        at: changed.readerIndex,
+                        length: bytes.readerIndex - changed.readerIndex
+                    )!
+                    XCTAssertEqual(self.encoding(of: key), consumed, "byte \(index) changed with \(mask)")
+                }
+            }
+
+            // Most changes leave a certificate that can be read: one that says something else.
+            XCTAssertGreaterThan(read, encoded.readableBytes)
+        }
+    }
+
+    func testCertificateIsWrittenFromItsFieldsOnceChanged() throws {
+        let hostKey = NIOSSHPrivateKey(ed25519Key: .init())
+        let encoded = try XCTUnwrap(try self.hostCertificatesEncodedDifferently(for: hostKey).last)
+
+        var bytes = encoded
+        let original = try XCTUnwrap(NIOSSHCertifiedPublicKey(try XCTUnwrap(try bytes.readSSHHostKey())))
+
+        // The same certificate with an empty reserved field, which is how NIOSSH writes one.
+        var fromFields = ByteBuffer()
+        fromFields.writeBytes(original.signableBytes.readableBytesView)
+        fromFields.writeCompositeSSHString { $0.writeSSHSignature(original.signature) }
+        XCTAssertNotEqual(fromFields, encoded)
+        XCTAssertEqual(fromFields.readableBytes, encoded.readableBytes - 3)
+
+        // Any change, even one that changes nothing, makes the bytes that were read stale.
+        var changed = original
+        changed.serial = original.serial
+        XCTAssertEqual(self.encoding(of: NIOSSHPublicKey(changed)), fromFields)
+
+        // The value it was copied from is as it was.
+        XCTAssertEqual(self.encoding(of: NIOSSHPublicKey(original)), encoded)
+
+        // A uniquely referenced value is no different.
+        bytes = encoded
+        var unique = try XCTUnwrap(NIOSSHCertifiedPublicKey(try XCTUnwrap(try bytes.readSSHHostKey())))
+        unique.validPrincipals.append("other.example.com")
+        var reread = self.encoding(of: NIOSSHPublicKey(unique))
+        XCTAssertEqual(
+            try reread.readSSHHostKey().flatMap { NIOSSHCertifiedPublicKey($0) }?.validPrincipals,
+            ["host.example.com", "other.example.com"]
+        )
+    }
+
+    func testCertificatesAreComparedByTheirFieldsHoweverTheyWereEncoded() throws {
+        let hostKey = NIOSSHPrivateKey(ed25519Key: .init())
+        let encoded = try XCTUnwrap(try self.hostCertificatesEncodedDifferently(for: hostKey).last)
+
+        var bytes = encoded
+        let read = try XCTUnwrap(try bytes.readSSHHostKey())
+        var changed = try XCTUnwrap(NIOSSHCertifiedPublicKey(read))
+        changed.serial = changed.serial
+
+        // The reserved field is not a field of the certificate as NIOSSH holds it.
+        XCTAssertEqual(read, NIOSSHPublicKey(changed))
+        XCTAssertEqual(read.hashValue, NIOSSHPublicKey(changed).hashValue)
+        XCTAssertNotEqual(self.encoding(of: read), self.encoding(of: NIOSSHPublicKey(changed)))
+    }
+
     /// The encoding of a host certificate for `hostKey`, written by hand so that it can hold what ``NIOSSH`` does
     /// not write. Nobody signed it: ``NIOSSH`` does not validate certificates during key exchange.
     private func encodedHostCertificate(
         for hostKey: NIOSSHPrivateKey,
         keyID: [UInt8] = Array("test host".utf8),
+        extensions: [String] = [],
         reserved: [UInt8] = [],
         signatureKey: ByteBuffer? = nil,
         signature: ByteBuffer? = nil
@@ -511,7 +675,9 @@ final class HostCertificateAuthorityTests: XCTestCase {
         buffer.writeInteger(UInt64(0))
         buffer.writeInteger(UInt64.max)
         buffer.writeSSHString([])
-        buffer.writeSSHString([])
+        buffer.writeCompositeSSHString { buffer in
+            extensions.reduce(0) { $0 + buffer.writeSSHString($1.utf8) + buffer.writeSSHString([]) }
+        }
         buffer.writeSSHString(reserved)
         buffer.writeSSHString((signatureKey ?? unknownSignatureKey).readableBytesView)
         buffer.writeSSHString((signature ?? unknownSignature).readableBytesView)

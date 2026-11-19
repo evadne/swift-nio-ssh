@@ -111,7 +111,7 @@ public struct SSHClientConfiguration {
     /// that ``NIOSSH`` does not know, such as an RSA key.
     /// ``NIOSSHCertifiedPublicKey/validate(principal:type:allowedAuthoritySigningKeys:acceptableCriticalOptions:)``
     /// refuses such a certificate. A delegate that wants to trust it has to verify it itself, from the bytes that
-    /// `String(openSSHPublicKey:)` gives.
+    /// `String(openSSHPublicKey:)` gives, which are the bytes that the server presented.
     public var advertiseHostCertificateAlgorithms: Bool = false
 
     /// The types of host key that this client accepts in addition to the Ed25519 and ECDSA keys that ``NIOSSH``

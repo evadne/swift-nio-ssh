@@ -54,11 +54,17 @@ import Bionic
 ///
 /// A certificate authority may sign with a key of a kind that SwiftNIO SSH does not know, such as an RSA key, or with
 /// an algorithm that it does not know. Such a certificate can still be read from the network: the key it certifies is
-/// usable, so a peer that presents the certificate can prove that it holds that key, and the certificate can be
-/// written out again as it was signed. Its ``signatureKey`` and ``signature`` can only be compared and written, and
+/// usable, so a peer that presents the certificate can prove that it holds that key. Its ``signatureKey`` and
+/// ``signature`` can only be compared and written, and
 /// ``validate(principal:type:allowedAuthoritySigningKeys:acceptableCriticalOptions:)`` always refuses it, as
 /// SwiftNIO SSH cannot verify the signature. A user that wants to trust such a certificate has to verify it itself,
 /// from its bytes.
+///
+/// A certificate that was read from the network, or from an OpenSSH public key string, and has not been changed
+/// since is written out as the bytes it was read from. Those are the bytes that the peer signs when it proves that
+/// it holds the key, and the bytes that the certificate authority signed. They are not always the bytes that
+/// SwiftNIO SSH would write from the fields: a key ID need not be UTF-8, for example. Changing any property makes
+/// SwiftNIO SSH write the certificate from its fields instead.
 public struct NIOSSHCertifiedPublicKey {
     /// A CA-provided random bitstring of arbitrary length (typically 16 or 32 bytes). This defends against
     /// hash-collision attacks.
@@ -526,6 +532,10 @@ extension NIOSSHCertifiedPublicKey {
 
         fileprivate var signature: NIOSSHSignature
 
+        /// The bytes this key was read from, after the name of the key format, if it was read and has not been
+        /// changed since. A key that has these is written as them, and not from the fields above.
+        fileprivate var encodedFields: ByteBuffer?
+
         fileprivate init(
             nonce: ByteBuffer,
             serial: UInt64,
@@ -590,18 +600,38 @@ extension NIOSSHCertifiedPublicKey {
             self.extensions = original.extensions
             self.signatureKey = original.signatureKey
             self.signature = original.signature
+
+            // We only copy in order to mutate, and what is mutated is no longer what was read.
+            self.encodedFields = nil
         }
     }
 
     /// Guarantees that the storage for this key is unique. Must be called before mutating anything on `.backing`.
+    ///
+    /// As a mutation follows, this also forgets the bytes that this key was read from: they are about to stop
+    /// describing it.
     mutating func ensureUniqueStorage() {
         if !isKnownUniquelyReferenced(&self.backing) {
             self.backing = Backing(copying: self.backing)
         }
+        self.backing.encodedFields = nil
+    }
+
+    /// The bytes this key was read from, after the name of the key format, if it was read and has not been changed
+    /// since.
+    fileprivate var encodedFields: ByteBuffer? {
+        self.backing.encodedFields
+    }
+
+    /// Records the bytes that this key was just read from. Nothing else may hold the key yet.
+    fileprivate mutating func wasRead(from encodedFields: ByteBuffer) {
+        self.backing.encodedFields = encodedFields
     }
 }
 
 extension NIOSSHCertifiedPublicKey.Backing: Hashable {
+    // Keys are compared and hashed by their fields. The bytes that a key was read from say how it was encoded, not
+    // what it is.
     static func == (lhs: NIOSSHCertifiedPublicKey.Backing, rhs: NIOSSHCertifiedPublicKey.Backing) -> Bool {
         (lhs.nonce == rhs.nonce && lhs.serial == rhs.serial && lhs.type == rhs.type && lhs.key == rhs.key
             && lhs.keyID == rhs.keyID && lhs.validPrincipals == rhs.validPrincipals && lhs.validAfter == rhs.validAfter
@@ -629,6 +659,16 @@ extension NIOSSHCertifiedPublicKey.Backing: Hashable {
 extension ByteBuffer {
     @discardableResult
     mutating func writeCertifiedKey(_ key: NIOSSHCertifiedPublicKey) -> Int {
+        // A key that we read, and that has not been changed since, is written as it was read. Its encoding is
+        // signed over, by the peer that proves it holds the key and by the certificate authority, and we would not
+        // always produce the same encoding from the fields: we do not keep the reserved field, and we hold the key
+        // ID and the principals as strings, which they need not be.
+        if var encodedFields = key.encodedFields {
+            var written = self.writeSSHString(key.keyPrefix)
+            written += self.writeBuffer(&encodedFields)
+            return written
+        }
+
         // A certified key is the signable bytes plus the signature.
         var written = 0
         written += self.writeSignableBytes(key)
@@ -675,6 +715,7 @@ extension ByteBuffer {
     ) throws -> NIOSSHCertifiedPublicKey? where Bytes.Element == UInt8 {
         try self.rewindOnNilOrError { `self` in
             let innerKeyPrefix = try NIOSSHCertifiedPublicKey.baseKeyPrefixForKeyPrefix(keyPrefix)
+            let unreadBytes = self
 
             guard
                 let nonce = self.readSSHString(),
@@ -704,7 +745,7 @@ extension ByteBuffer {
                 throw NIOSSHError.invalidSSHMessage(reason: "invalid encoding of certified key")
             }
 
-            return try NIOSSHCertifiedPublicKey(
+            var certifiedKey = try NIOSSHCertifiedPublicKey(
                 nonce: nonce,
                 serial: serial,
                 type: NIOSSHCertifiedPublicKey.CertificateType(rawValue: rawType),
@@ -718,6 +759,11 @@ extension ByteBuffer {
                 signatureKey: signatureKey,
                 signature: signature
             )
+
+            // Everything we have just read is the encoding of the key, less the name of its format.
+            let encodedFieldsLength = self.readerIndex - unreadBytes.readerIndex
+            certifiedKey.wasRead(from: unreadBytes.getSlice(at: unreadBytes.readerIndex, length: encodedFieldsLength)!)
+            return certifiedKey
         }
     }
 
