@@ -234,6 +234,52 @@ final class DeferringGlobalRequestDelegate: GlobalRequestDelegate {
     }
 }
 
+/// Stands in for the socket of a peer that has stopped reading. An `EmbeddedChannel` takes every write and stays
+/// writable; a socket holds only so much. This handler counts the bytes written through it and, once they pass
+/// a high watermark, makes the channel unwritable and says so, as a socket channel does.
+final class UnreadSocketHandler: ChannelOutboundHandler {
+    typealias OutboundIn = ByteBuffer
+    typealias OutboundOut = ByteBuffer
+
+    private let highWatermark: Int
+    private var heldBytes = 0
+    private var context: ChannelHandlerContext?
+
+    init(highWatermark: Int) {
+        self.highWatermark = highWatermark
+    }
+
+    func handlerAdded(context: ChannelHandlerContext) {
+        self.context = context
+    }
+
+    func handlerRemoved(context: ChannelHandlerContext) {
+        self.context = nil
+    }
+
+    func write(context: ChannelHandlerContext, data: NIOAny, promise: EventLoopPromise<Void>?) {
+        self.heldBytes += self.unwrapOutboundIn(data).readableBytes
+        context.write(data, promise: promise)
+        self.setWritable(self.heldBytes <= self.highWatermark)
+    }
+
+    /// The peer has read everything that was written.
+    func peerReadEverything() {
+        self.heldBytes = 0
+        self.setWritable(true)
+    }
+
+    private func setWritable(_ writable: Bool) {
+        guard let context = self.context, let channel = context.channel as? EmbeddedChannel,
+            channel.isWritable != writable
+        else {
+            return
+        }
+        channel.isWritable = writable
+        context.fireChannelWritabilityChanged()
+    }
+}
+
 class EndToEndTests: XCTestCase {
     var channel: BackToBackEmbeddedChannel!
 
@@ -852,6 +898,40 @@ class EndToEndTests: XCTestCase {
 
         self.channel.client.isWritable = true
         self.channel.client.pipeline.fireChannelWritabilityChanged()
+        XCTAssertTrue(childChannel.isWritable)
+    }
+
+    func testChildChannelIsUnwritableWhileThePeerDoesNotRead() throws {
+        XCTAssertNoThrow(try self.channel.configureWithHarness(TestHarness()))
+        XCTAssertNoThrow(try self.channel.activate())
+        XCTAssertNoThrow(try self.channel.interactInMemory())
+
+        let childChannel = try self.channel.createNewChannel()
+        XCTAssertNoThrow(try self.channel.interactInMemory())
+        XCTAssertTrue(childChannel.isWritable)
+
+        // From here on the peer reads nothing, and the connection holds 64 kB before it stops being writable.
+        let highWatermark = 1 << 16
+        let socket = UnreadSocketHandler(highWatermark: highWatermark)
+        XCTAssertNoThrow(try self.channel.client.pipeline.syncOperations.addHandler(socket, position: .first))
+
+        // An application writes for as long as its channel is writable. We stop it at 4 MB, half of the window
+        // the peer granted, so that it is not the window that stops it.
+        let chunk = ByteBuffer(repeating: 0, count: 1 << 12)
+        let limit = 1 << 22
+        var written = 0
+        while childChannel.isWritable, written < limit {
+            childChannel.writeAndFlush(SSHChannelData(type: .channel, data: .byteBuffer(chunk)), promise: nil)
+            written += chunk.readableBytes
+        }
+
+        // It was told to wait as soon as the connection could hold no more, give or take one write.
+        XCTAssertFalse(childChannel.isWritable)
+        XCTAssertLessThanOrEqual(written, highWatermark + chunk.readableBytes)
+
+        // The peer reads again, and the application may write again.
+        XCTAssertNoThrow(try self.channel.interactInMemory())
+        socket.peerReadEverything()
         XCTAssertTrue(childChannel.isWritable)
     }
 
