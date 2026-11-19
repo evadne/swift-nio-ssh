@@ -45,6 +45,21 @@ final class GlobalRequestTests: XCTestCase {
         }
     }
 
+    /// A delegate that keeps the promises of the requests ``NIOSSH`` does not know, for the test to complete.
+    private final class HoldingGlobalRequestDelegate: GlobalRequestDelegate {
+        var promises: [EventLoopPromise<ByteBuffer?>] = []
+
+        func unknownGlobalRequest(
+            name: String,
+            data: ByteBuffer,
+            wantReply: Bool,
+            handler: NIOSSHHandler,
+            promise: EventLoopPromise<ByteBuffer?>
+        ) {
+            self.promises.append(promise)
+        }
+    }
+
     /// A client that has authenticated with a real server, whose part the test plays from here on.
     private func makeAuthenticatedChannel(
         globalRequestDelegate: GlobalRequestDelegate? = nil
@@ -202,6 +217,41 @@ final class GlobalRequestTests: XCTestCase {
 
         XCTAssertEqual(delegate.requests.count, 3)
         XCTAssertEqual(delegate.requests.map { $0.wantReply }, [true, true, true])
+    }
+
+    func testTheDelegateMayAnswerUnknownRequestsInAnyOrder() throws {
+        let delegate = HoldingGlobalRequestDelegate()
+        let channel = try self.makeAuthenticatedChannel(globalRequestDelegate: delegate)
+
+        // Three requests. The second does not want a reply.
+        for (name, wantReply) in [
+            ("first@example.com", true), ("second@example.com", false), ("third@example.com", true),
+        ] {
+            XCTAssertNoThrow(
+                try channel.sendFromScriptedServer(
+                    .globalRequest(.init(wantReply: wantReply, type: .unknown(name, ByteBuffer())))
+                )
+            )
+        }
+        guard delegate.promises.count == 3 else {
+            return XCTFail("Expected three requests, got \(delegate.promises.count)")
+        }
+        XCTAssertEqual(try channel.messagesForScriptedServer(), [])
+
+        // The delegate answers the last request first. Its reply waits for the reply to the first.
+        delegate.promises[2].succeed(ByteBuffer(bytes: [3]))
+        XCTAssertEqual(try channel.messagesForScriptedServer(), [])
+
+        // The second request has no reply, and holds nothing back.
+        delegate.promises[1].succeed(nil)
+        XCTAssertEqual(try channel.messagesForScriptedServer(), [])
+
+        // Once the first is answered, both replies are sent, in the order of the requests.
+        delegate.promises[0].fail(RecordingGlobalRequestDelegate.Refused())
+        XCTAssertEqual(
+            try channel.messagesForScriptedServer(),
+            [.requestFailure, .requestSuccess(.init(buffer: ByteBuffer(bytes: [3])))]
+        )
     }
 
     func testRequestsThatAreKnownAreNotGivenToTheDelegateAsUnknown() throws {

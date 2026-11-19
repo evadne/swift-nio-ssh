@@ -40,9 +40,11 @@ public protocol GlobalRequestDelegate {
     /// such extensions.
     ///
     /// If the peer asked for a reply, succeeding `promise` accepts the request, with the request-specific data
-    /// of the reply if there is any, and failing `promise` refuses it. Requests must be replied to in the order
-    /// in which they arrive (RFC 4254 § 4), so `promise` should be completed before this method returns. If the
-    /// peer did not ask for a reply, `promise` must still be completed, and nothing is sent.
+    /// of the reply if there is any, and failing `promise` refuses it. `promise` may be completed at any time:
+    /// replies are sent in the order in which the requests arrived (RFC 4254 § 4), so a reply is held until
+    /// every earlier request that asked for one has been answered, and a `promise` that is never completed
+    /// holds back every later reply. If the peer did not ask for a reply, `promise` must still be completed,
+    /// and nothing is sent.
     ///
     /// The eventLoop associated with the promise passed in must be the same as the one used to create the handler.
     ///
