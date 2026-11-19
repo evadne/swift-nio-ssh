@@ -252,8 +252,10 @@ extension NIOSSHHandler: ChannelDuplexHandler {
             try self.handleGlobalRequest(message)
         case .globalRequestResponse(let response):
             try self.handleGlobalRequestResponse(response)
-        case .disconnect:
-            // Welp, we immediately have to close.
+        case .disconnect(let message):
+            // Welp, we immediately have to close. We tell the rest of the pipeline why first: once we have
+            // closed, a peer that disconnected us looks just like a connection that was lost.
+            context.fireUserInboundEventTriggered(NIOSSHDisconnectEvent(message))
             context.close(promise: nil)
         case .event(let event):
             context.fireUserInboundEventTriggered(event)

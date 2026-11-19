@@ -126,9 +126,9 @@ struct SSHConnectionStateMachine {
                         self = .keyExchange(newState)
                         return .emitMessage(SSHMultiMessage(.keyExchange(message)))
 
-                    case .disconnect:
+                    case .disconnect(let message):
                         self = .receivedDisconnect(state.role)
-                        return .disconnect
+                        return .disconnect(message)
 
                     case .unimplemented(let unimplemented):
                         throw NIOSSHError.remotePeerDoesNotSupportMessage(unimplemented)
@@ -167,9 +167,9 @@ struct SSHConnectionStateMachine {
                         try state.receiveNewKeysMessage()
                         self = .receivedNewKeys(.init(keyExchangeState: state, loop: loop))
                         return .noMessage
-                    case .disconnect:
+                    case .disconnect(let message):
                         self = .receivedDisconnect(state.role)
-                        return .disconnect
+                        return .disconnect(message)
                     case .ignore, .debug:
                         // Ignore these
                         self = .keyExchange(state)
@@ -226,9 +226,9 @@ struct SSHConnectionStateMachine {
                         try state.receiveNewKeysMessage()
                         self = .userAuthentication(.init(sentNewKeysState: state))
                         return .noMessage
-                    case .disconnect:
+                    case .disconnect(let message):
                         self = .receivedDisconnect(state.role)
-                        return .disconnect
+                        return .disconnect(message)
                     case .ignore, .debug:
                         // Ignore these
                         self = .sentNewKeys(state)
@@ -278,9 +278,9 @@ struct SSHConnectionStateMachine {
                         self = .receivedNewKeys(state)
                         return result
 
-                    case .disconnect:
+                    case .disconnect(let message):
                         self = .receivedDisconnect(state.role)
-                        return .disconnect
+                        return .disconnect(message)
 
                     case .ignore, .debug:
                         // Ignore these
@@ -358,9 +358,9 @@ struct SSHConnectionStateMachine {
                         self = .userAuthentication(state)
                         return result
 
-                    case .disconnect:
+                    case .disconnect(let message):
                         self = .receivedDisconnect(state.role)
-                        return .disconnect
+                        return .disconnect(message)
 
                     case .ignore, .debug:
                         // Ignore these
@@ -429,9 +429,9 @@ struct SSHConnectionStateMachine {
                         let result = try newState.receiveKeyExchangeMessage(message)
                         self = .receivedKexInitWhenActive(newState)
                         return result
-                    case .disconnect:
+                    case .disconnect(let message):
                         self = .receivedDisconnect(state.role)
-                        return .disconnect
+                        return .disconnect(message)
                     case .ignore, .debug:
                         // Ignore these
                         self = .active(state)
@@ -471,9 +471,9 @@ struct SSHConnectionStateMachine {
                         let result = try state.receiveKeyExchangeInitMessage(message)
                         self = .receivedKexInitWhenActive(state)
                         return result
-                    case .disconnect:
+                    case .disconnect(let message):
                         self = .receivedDisconnect(state.role)
-                        return .disconnect
+                        return .disconnect(message)
                     case .ignore, .debug:
                         // Ignore these
                         self = .receivedKexInitWhenActive(state)
@@ -555,9 +555,9 @@ struct SSHConnectionStateMachine {
                         try state.receiveRequestFailure()
                         self = .sentKexInitWhenActive(state)
                         return .globalRequestResponse(.failure)
-                    case .disconnect:
+                    case .disconnect(let message):
                         self = .receivedDisconnect(state.role)
-                        return .disconnect
+                        return .disconnect(message)
                     case .ignore, .debug:
                         // Ignore these
                         self = .sentKexInitWhenActive(state)
@@ -605,9 +605,9 @@ struct SSHConnectionStateMachine {
                         let newState = RekeyingReceivedNewKeysState(state)
                         self = .rekeyingReceivedNewKeysState(newState)
                         return .noMessage
-                    case .disconnect:
+                    case .disconnect(let message):
                         self = .receivedDisconnect(state.role)
-                        return .disconnect
+                        return .disconnect(message)
                     case .ignore, .debug:
                         // Ignore these
                         self = .rekeying(state)
@@ -686,9 +686,9 @@ struct SSHConnectionStateMachine {
                         try state.receiveRequestFailure()
                         self = .rekeyingReceivedNewKeysState(state)
                         return .globalRequestResponse(.failure)
-                    case .disconnect:
+                    case .disconnect(let message):
                         self = .receivedDisconnect(state.role)
-                        return .disconnect
+                        return .disconnect(message)
                     case .ignore, .debug:
                         // Ignore these
                         self = .rekeyingReceivedNewKeysState(state)
@@ -736,9 +736,9 @@ struct SSHConnectionStateMachine {
                         let newState = ActiveState(state)
                         self = .active(newState)
                         return .noMessage
-                    case .disconnect:
+                    case .disconnect(let message):
                         self = .receivedDisconnect(state.role)
-                        return .disconnect
+                        return .disconnect(message)
                     case .ignore, .debug:
                         // Ignore these
                         self = .rekeyingSentNewKeysState(state)
@@ -1219,7 +1219,7 @@ extension SSHConnectionStateMachine {
         case forwardToMultiplexer(SSHMessage)
         case globalRequestResponse(GlobalRequestResponse)
         case globalRequest(SSHMessage.GlobalRequestMessage)
-        case disconnect
+        case disconnect(SSHMessage.DisconnectMessage)
         case noMessage
         case event(Any)
 
