@@ -50,6 +50,30 @@ public struct SSHClientConfiguration {
         }
     }
 
+    /// The software version that this client names in its identification string, which is the first thing it
+    /// sends to a server: `SSH-2.0-` followed by this value (RFC 4253 § 4.2). Defaults to `SwiftNIOSSH_1.0`.
+    ///
+    /// Servers log this string, and some change their behavior according to it.
+    ///
+    /// - Precondition: Must be between 1 and 64 printable US-ASCII characters, none of which is a space or a
+    ///   minus sign.
+    public var softwareVersion: String = Constants.softwareVersion {
+        didSet {
+            precondition(
+                Self.isValidSoftwareVersion(self.softwareVersion),
+                "softwareVersion must be 1 to 64 printable US-ASCII characters without spaces or minus signs"
+            )
+        }
+    }
+
+    /// Whether `softwareVersion` may be used in an identification string. RFC 4253 § 4.2 allows printable
+    /// US-ASCII characters other than whitespace and the minus sign, and limits the whole string to 255 bytes.
+    internal static func isValidSoftwareVersion(_ softwareVersion: String) -> Bool {
+        let bytes = softwareVersion.utf8
+        return (1...64).contains(bytes.count)
+            && bytes.allSatisfy { $0 > UInt8(ascii: " ") && $0 < 0x7F && $0 != UInt8(ascii: "-") }
+    }
+
     /// Whether this client offers the OpenSSH host certificate algorithms (`*-cert-v01@openssh.com`) ahead of
     /// the plain host key algorithms. Defaults to `false`.
     ///

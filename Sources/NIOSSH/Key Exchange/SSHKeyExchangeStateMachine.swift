@@ -111,11 +111,11 @@ struct SSHKeyExchangeStateMachine {
 
         switch self.role {
         case .client:
-            self.initialExchangeBytes.writeSSHString(Constants.version.utf8)
+            self.initialExchangeBytes.writeSSHString(self.role.version.utf8)
             self.initialExchangeBytes.writeSSHString(remoteVersion.utf8)
         case .server:
             self.initialExchangeBytes.writeSSHString(remoteVersion.utf8)
-            self.initialExchangeBytes.writeSSHString(Constants.version.utf8)
+            self.initialExchangeBytes.writeSSHString(self.role.version.utf8)
         }
     }
 

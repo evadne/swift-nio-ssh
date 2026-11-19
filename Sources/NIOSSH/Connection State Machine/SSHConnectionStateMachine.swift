@@ -792,8 +792,8 @@ struct SSHConnectionStateMachine {
 
     func start() -> SSHMultiMessage? {
         switch self.state {
-        case .idle:
-            return SSHMultiMessage(SSHMessage.version(Constants.version))
+        case .idle(let state):
+            return SSHMultiMessage(SSHMessage.version(state.role.version))
         case .sentVersion, .keyExchange, .sentNewKeys, .receivedNewKeys, .userAuthentication,
             .active, .receivedKexInitWhenActive, .sentKexInitWhenActive, .rekeying, .rekeyingReceivedNewKeysState,
             .rekeyingSentNewKeysState, .receivedDisconnect, .sentDisconnect:

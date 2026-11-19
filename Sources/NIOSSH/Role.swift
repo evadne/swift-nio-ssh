@@ -47,6 +47,17 @@ public enum SSHConnectionRole {
         }
     }
 
+    /// The identification string that this peer sends, without its line ending. This is also part of what the
+    /// key exchange signs, so it must be the same wherever it is used.
+    internal var version: String {
+        switch self {
+        case .client(let configuration):
+            return "SSH-2.0-" + configuration.softwareVersion
+        case .server:
+            return Constants.version
+        }
+    }
+
     /// The types of host key of a custom kind that the peer may present. Only clients are presented with host keys.
     internal var customHostKeyTypes: [any NIOSSHVerifyingPublicKeyProtocol.Type] {
         switch self {
