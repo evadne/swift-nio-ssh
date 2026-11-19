@@ -37,7 +37,7 @@ The series is the commits after `FORK.md` on the branch:
 
 It has two parts. What was written for this fork stands before and after what was picked.
 
-**Written for this fork**, fifteen commits.
+**Written for this fork**, eighteen commits.
 
 Eleven come first, each a feature that is off or has Apple's value until the application sets
 it: host certificate algorithms offered; keys of a custom kind that sign, and host keys of a
@@ -45,8 +45,8 @@ custom kind; keyboard-interactive authentication for a client; partial success r
 global requests that NIOSSH does not know, sent and received; the peer's disconnect message
 reported; the client's software version; strict key exchange; and extension negotiation.
 
-Four come last, each the fix of a defect, made after a test showed the defect on this
-branch:
+Four follow what was picked, each the fix of a defect, made after a test showed the defect on
+this branch:
 
 - A message for a channel that the peer has not confirmed is a protocol violation of the
   connection, where it trapped. A server could answer a request for a channel with channel
@@ -62,6 +62,46 @@ branch:
   loop. A channel that the client asked for fails with a protocol violation and is closed; one
   that the peer asks for is answered with a failure. The connection goes on. Every other
   value is worked with as before, down to a maximum packet size of one.
+
+Three stand at the end of the series, after the fixes. Nothing in them is set by the
+application: each is inert until a peer presents what failed before, or until the application
+reads what is new.
+
+- A certificate signed by a key of a kind that the package does not have, or with an
+  algorithm that it does not have, is read, where it failed to parse with `unknownPublicKey`
+  or `unknownSignature`. An RSA authority is the common case. A client that offers the host
+  certificate algorithms could not reach a host whose certificate such an authority had
+  signed: the key exchange reply did not parse, and the delegate was never asked. The
+  certificate's signature key and its signature are kept as their bytes, which can be
+  compared and written and which verify nothing. Key exchange verifies the host's signature
+  under the certified key, as before, and the delegate is given the certificate. The
+  package's own `NIOSSHCertifiedPublicKey.validate` refuses such a certificate, whatever
+  signing keys it is given, with an error that says why: the application validates it from
+  its bytes or takes its plain key. A key or a signature of an unknown kind is still refused
+  everywhere else, and a malformed certificate is still refused.
+- A certificate that was read is written as the bytes it was read from, where it was written
+  again from its fields. By the tests, the two differ where the reserved field is not empty,
+  where the key ID is not UTF-8, and where the extensions are not in order or repeat a name;
+  by the source, the principals are read as the key ID is and the critical options as the
+  extensions are. The exchange hash covers the host key as the host sent it, so key exchange
+  with a host that presented such a certificate failed with `invalidExchangeHashSignature`;
+  and what `String(openSSHPublicKey:)` gave an application were not the bytes that the
+  authority had signed. Setting any property of a certificate makes the package write it
+  from its fields again. Equality and `validate` are as they were.
+- `NIOSSHHandler.sessionIdentifier`, the exchange hash of the first key exchange, for a
+  signature that is defined over it, such as a host's proof of the keys it advertises
+  (`hostkeys-prove-00@openssh.com`). It is `nil` until both peers have sent the new keys
+  message of the first key exchange, and the same value from then on, whatever keys are
+  exchanged later. It is read on the channel and may be read from a delegate's methods. It
+  is a read and not an event: an event fired on every connection would change what an
+  application that sets nothing sees, and the package's own test of the banner, which takes
+  the first user event to be the banner or the success, then never finished.
+
+What an application that sets nothing can observe of the first two: a certificate of the
+kinds described can be read by `NIOSSHPublicKey.init(openSSHPublicKey:)`, where it threw; a
+server that presents one although no certificate algorithm was negotiated is refused with
+`invalidHostKeyForKeyExchange`, where it was refused with the parse error; and a certificate
+that was read and not changed is written as it was read.
 
 **Picked from other works**, each after a test showed the defect on this branch; the works
 are listed under [Attribution](#attribution):
@@ -127,7 +167,7 @@ package or of a pull request to it, in a tree that carries Apple's `LICENSE.txt`
 
 ### Followed
 
-The fifteen patches written for this fork copy no code from another work. Where one follows
+The eighteen patches written for this fork copy no code from another work. Where one follows
 the names or the design of another work, so that an application written against it needs
 little change if Apple takes that work, the patch's message says so. Those works, all under
 the Apache License 2.0:
