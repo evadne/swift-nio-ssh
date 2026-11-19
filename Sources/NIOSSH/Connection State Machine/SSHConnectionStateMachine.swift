@@ -1292,6 +1292,30 @@ extension SSHConnectionStateMachine {
         }
     }
 
+    /// The session identifier of the connection, once its first key exchange has completed: once both peers have
+    /// sent the NEWKEYS message of that exchange. It never changes after that, however often keys are exchanged
+    /// again (RFC 4253 § 7.2).
+    var sessionIdentifier: ByteBuffer? {
+        switch self.state {
+        case .userAuthentication(let state):
+            return state.sessionIdentifier
+        case .active(let state):
+            return state.sessionIdentifier
+        case .receivedKexInitWhenActive(let state):
+            return state.sessionIdentifier
+        case .sentKexInitWhenActive(let state):
+            return state.sessionIdentitifier
+        case .rekeying(let state):
+            return state.sessionIdentifier
+        case .rekeyingReceivedNewKeysState(let state):
+            return state.sessionIdentifier
+        case .rekeyingSentNewKeysState(let state):
+            return state.sessionIdentifier
+        case .idle, .sentVersion, .keyExchange, .receivedNewKeys, .sentNewKeys, .receivedDisconnect, .sentDisconnect:
+            return nil
+        }
+    }
+
     var disconnected: Bool {
         switch self.state {
         case .receivedDisconnect, .sentDisconnect:

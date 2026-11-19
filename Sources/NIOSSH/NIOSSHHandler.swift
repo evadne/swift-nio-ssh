@@ -76,6 +76,11 @@ public final class NIOSSHHandler {
     // The number of replies to global requests from the remote peer that have been sent so far.
     private var sentInboundGlobalRequestReplies: Int
 
+    // The session identifier of the connection, once its first key exchange has completed. The state machine holds
+    // it too. We keep it here so that it can be read while the state machine is at work: the state machine calls
+    // out to the delegates, and a delegate may want the session identifier there and then.
+    private var establishedSessionIdentifier: ByteBuffer?
+
     /// Construct a new ``NIOSSHHandler``.
     ///
     /// - parameters:
@@ -96,6 +101,7 @@ public final class NIOSSHHandler {
         self.pendingChildWrites = CircularBuffer(initialCapacity: 4)
         self.pendingInboundGlobalRequestReplies = []
         self.sentInboundGlobalRequestReplies = 0
+        self.establishedSessionIdentifier = nil
         self.multiplexer = SSHChannelMultiplexer(
             delegate: self,
             allocator: allocator,
@@ -200,6 +206,7 @@ extension NIOSSHHandler: ChannelDuplexHandler {
                 allocator: context.channel.allocator,
                 loop: context.eventLoop
             ) {
+                self.noteSessionIdentifierIfEstablished()
                 try self.processInboundMessageResult(result, context: context)
             }
             self.drainPendingChildWritesIfPossible(context: context)
@@ -239,7 +246,19 @@ extension NIOSSHHandler: ChannelDuplexHandler {
             self.pendingWrite = true
         }
 
+        self.noteSessionIdentifierIfEstablished()
         context.write(self.wrapOutboundOut(self.outboundFrameBuffer), promise: promise)
+    }
+
+    /// Takes note of the session identifier if the first key exchange has just completed.
+    ///
+    /// The first key exchange completes when the second of its two NEWKEYS messages is sent or received, so this is
+    /// called whenever the state machine has processed a message in either direction. The session identifier never
+    /// changes after that, so once we have it we do not ask again.
+    private func noteSessionIdentifierIfEstablished() {
+        if self.establishedSessionIdentifier == nil {
+            self.establishedSessionIdentifier = self.stateMachine.sessionIdentifier
+        }
     }
 
     private func processInboundMessageResult(
@@ -661,6 +680,37 @@ extension NIOSSHHandler {
             loop: self.context!.eventLoop
         )
         self.context!.writeAndFlush(self.wrapOutboundOut(buffer), promise: nil)
+    }
+}
+
+// MARK: Session identifier
+
+extension NIOSSHHandler {
+    /// The session identifier of this connection, or `nil` if the connection does not have one yet.
+    ///
+    /// The session identifier is the exchange hash of the first key exchange (RFC 4253 § 7.2). Both peers compute
+    /// the same value, no two connections have the same one, and it does not change when keys are exchanged
+    /// again. It is what ties a signature to one connection, so that a signature made for one connection is of
+    /// no use in another. ``NIOSSH`` uses it this way itself, for user authentication with a private key.
+    ///
+    /// An application needs the session identifier to make or to verify any other signature that is defined over
+    /// it. The proof that a server gives of the host keys it advertises is one: in answer to the global request
+    /// `hostkeys-prove-00@openssh.com`, each key signs the string `hostkeys-prove-00@openssh.com`, the session
+    /// identifier and the key itself. Section 2.5 of the `PROTOCOL` document of OpenSSH names the extension, and
+    /// the Internet-Draft it refers to, `draft-miller-sshm-hostkey-update`, defines the signature. The session
+    /// identifier is not a key, and nothing is encrypted with it. Both peers know it, and whoever is to verify
+    /// such a signature must be told it.
+    ///
+    /// This is `nil` until the first key exchange has completed, which is when both peers have taken its keys
+    /// into use, and before user authentication begins. A client has by then verified that the server holds
+    /// its host key, and its ``NIOSSHClientServerAuthenticationDelegate`` has accepted that key. From then on
+    /// this is the same value for as long as the handler exists: during and after every later key exchange, and
+    /// after the connection has ended.
+    ///
+    /// This property is **not** thread-safe: it may only be read from on the channel. There it may be read at
+    /// any time, including from the methods of a delegate.
+    public var sessionIdentifier: ByteBuffer? {
+        self.establishedSessionIdentifier
     }
 }
 

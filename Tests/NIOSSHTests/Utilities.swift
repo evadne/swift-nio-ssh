@@ -396,6 +396,9 @@ final class ScriptedServer {
 
     let channel = EmbeddedChannel()
 
+    /// The client that this server talks to.
+    let clientHandler: NIOSSHHandler
+
     let userEvents = UserEventExpecter()
 
     var hostKey = NIOSSHPrivateKey(ed25519Key: .init())
@@ -410,6 +413,9 @@ final class ScriptedServer {
         encryptionAlgorithms: [Substring(PlaintextTransportProtection.cipherName)]
     )
 
+    /// The exchange hash of every key exchange so far, as this server computed it.
+    private(set) var exchangeHashes: [ByteBuffer] = []
+
     private let clientVersion: String
 
     init(_ configure: (inout SSHClientConfiguration) -> Void = { _ in }) throws {
@@ -421,12 +427,12 @@ final class ScriptedServer {
         configure(&configuration)
         self.clientVersion = "SSH-2.0-" + configuration.softwareVersion
 
-        let handler = NIOSSHHandler(
+        self.clientHandler = NIOSSHHandler(
             role: .client(configuration),
             allocator: self.channel.allocator,
             inboundChildChannelInitializer: nil
         )
-        try self.channel.pipeline.syncOperations.addHandlers([handler, self.userEvents])
+        try self.channel.pipeline.syncOperations.addHandlers([self.clientHandler, self.userEvents])
         try self.channel.connect(to: .init(unixDomainSocketPath: "/fake")).wait()
     }
 
@@ -467,10 +473,12 @@ final class ScriptedServer {
     ///     - beforeNewKeys: Messages to send between the server's reply and its new keys message.
     ///     - whileExchanging: Called once both peers have sent their key exchange initialization, before the
     ///         server replies.
+    ///     - afterReply: Called once the server has replied, before it sends anything more.
     func exchangeKeys(
         clientMessage: SSHMessage.KeyExchangeMessage? = nil,
         beforeNewKeys: [SSHMessage] = [],
-        whileExchanging: () throws -> Void = {}
+        whileExchanging: () throws -> Void = {},
+        afterReply: () throws -> Void = {}
     ) throws {
         let serverMessage = self.keyExchange.keyExchangeMessage()
         try self.send(.keyExchange(serverMessage))
@@ -487,6 +495,11 @@ final class ScriptedServer {
 
         try whileExchanging()
 
+        let sign: (SHA256.Digest) throws -> NIOSSHSignature = { exchangeHash in
+            self.exchangeHashes.append(ByteBuffer(bytes: exchangeHash))
+            return try self.hostKey.sign(digest: exchangeHash)
+        }
+
         if let encodedHostKey = self.encodedHostKey {
             let reply = try self.keyExchange.encodedReply(
                 clientVersion: self.clientVersion,
@@ -494,7 +507,7 @@ final class ScriptedServer {
                 serverMessage: serverMessage,
                 keyExchangeInit: keyExchangeInit,
                 presenting: encodedHostKey,
-                sign: { try self.hostKey.sign(digest: $0) }
+                sign: sign
             )
             try self.channel.writeInbound(ByteBuffer.plaintextSSHPacket(encodedMessage: reply))
         } else {
@@ -504,10 +517,12 @@ final class ScriptedServer {
                 serverMessage: serverMessage,
                 keyExchangeInit: keyExchangeInit,
                 presenting: self.hostKey.publicKey,
-                sign: { try self.hostKey.sign(digest: $0) }
+                sign: sign
             )
             try self.send(.keyExchangeReply(reply))
         }
+        try afterReply()
+
         for message in beforeNewKeys {
             try self.send(message)
         }
