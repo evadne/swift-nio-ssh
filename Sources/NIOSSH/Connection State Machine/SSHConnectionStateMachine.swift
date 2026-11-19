@@ -171,7 +171,8 @@ struct SSHConnectionStateMachine {
                         self = .receivedDisconnect(state.role)
                         return .disconnect(message)
                     case .ignore, .debug:
-                        // Ignore these
+                        // Ignore these, unless strict key exchange forbids them during the first key exchange.
+                        try state.parser.validateNotInStrictKeyExchange(message)
                         self = .keyExchange(state)
                         return .noMessage
                     case .unimplemented(let unimplemented):
@@ -230,7 +231,8 @@ struct SSHConnectionStateMachine {
                         self = .receivedDisconnect(state.role)
                         return .disconnect(message)
                     case .ignore, .debug:
-                        // Ignore these
+                        // Ignore these, unless strict key exchange forbids them during the first key exchange.
+                        try state.parser.validateNotInStrictKeyExchange(message)
                         self = .sentNewKeys(state)
                         return .noMessage
                     case .unimplemented(let unimplemented):

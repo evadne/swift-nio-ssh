@@ -24,6 +24,17 @@ extension AcceptsKeyExchangeMessages {
     ) throws -> SSHConnectionStateMachine.StateMachineInboundProcessResult {
         let message = try self.keyExchangeStateMachine.handle(keyExchange: message)
 
+        if self.keyExchangeStateMachine.strictKeyExchange {
+            // Under strict key exchange the peer's key exchange initialization must be the first packet it sent.
+            guard self.parser.sequenceNumber == 1 else {
+                throw NIOSSHError.protocolViolation(
+                    protocolName: "key exchange",
+                    violation: "strict key exchange: the first packet was not the key exchange initialization"
+                )
+            }
+            self.parser.strictKeyExchange = true
+        }
+
         if let message = message {
             return .emitMessage(message)
         } else {

@@ -13,6 +13,7 @@
 //===----------------------------------------------------------------------===//
 
 import Crypto
+import NIOConcurrencyHelpers
 import NIOCore
 import NIOEmbedded
 import XCTest
@@ -265,6 +266,10 @@ class TestTransportProtection: NIOSSHTransportProtection {
 /// With this scheme negotiated, a test can play one side of a connection by hand after key exchange: it can
 /// write packets for a ``NIOSSHHandler`` to read, and it can read the packets that the handler writes.
 final class PlaintextTransportProtection: NIOSSHTransportProtection {
+    /// The sequence numbers that instances of this scheme have been given for the packets they were asked to
+    /// protect, in order. Tests that read this must reset it first.
+    static let sequenceNumbers = NIOLockedValueBox<(inbound: [UInt32], outbound: [UInt32])>(([], []))
+
     static var cipherBlockSize: Int { 8 }
 
     static var cipherName: String { "plaintext@test.example.com" }
@@ -289,10 +294,13 @@ final class PlaintextTransportProtection: NIOSSHTransportProtection {
         guard let content = source.readPlaintextPacketContent() else {
             throw NIOSSHError.invalidEncryptedPacketLength
         }
+        Self.sequenceNumbers.withLockedValue { $0.inbound.append(sequenceNumber) }
         return content
     }
 
-    func encryptPacket(_ destination: inout ByteBuffer, sequenceNumber: UInt32) throws {}
+    func encryptPacket(_ destination: inout ByteBuffer, sequenceNumber: UInt32) throws {
+        Self.sequenceNumbers.withLockedValue { $0.outbound.append(sequenceNumber) }
+    }
 }
 
 extension ByteBuffer {
@@ -359,5 +367,119 @@ extension TestHarness {
         harness.configureClient = { $0.transportProtectionSchemes = [PlaintextTransportProtection.self] }
         harness.configureServer = { $0.transportProtectionSchemes = [PlaintextTransportProtection.self] }
         return harness
+    }
+}
+
+/// A server played by hand, from the first byte, against a client ``NIOSSHHandler``.
+///
+/// ``NIOSSH`` servers do not implement every extension that clients do. This type lets a test be the server for
+/// those: it exchanges keys as a server would and protects nothing afterwards.
+final class ScriptedServer {
+    static let version = "SSH-2.0-Scripted_1.0"
+
+    let channel = EmbeddedChannel()
+
+    let userEvents = UserEventExpecter()
+
+    let hostKey = NIOSSHPrivateKey(ed25519Key: .init())
+
+    var keyExchange = ScriptedKeyExchangeServer(
+        version: ScriptedServer.version,
+        hostKeyAlgorithms: ["ssh-ed25519"],
+        encryptionAlgorithms: [Substring(PlaintextTransportProtection.cipherName)]
+    )
+
+    private let clientVersion: String
+
+    init(_ configure: (inout SSHClientConfiguration) -> Void = { _ in }) throws {
+        var configuration = SSHClientConfiguration(
+            userAuthDelegate: InfinitePasswordDelegate(),
+            serverAuthDelegate: AcceptAllHostKeysDelegate()
+        )
+        configuration.transportProtectionSchemes = [PlaintextTransportProtection.self]
+        configure(&configuration)
+        self.clientVersion = "SSH-2.0-" + configuration.softwareVersion
+
+        let handler = NIOSSHHandler(
+            role: .client(configuration),
+            allocator: self.channel.allocator,
+            inboundChildChannelInitializer: nil
+        )
+        try self.channel.pipeline.syncOperations.addHandlers([handler, self.userEvents])
+        try self.channel.connect(to: .init(unixDomainSocketPath: "/fake")).wait()
+    }
+
+    /// Sends `message` to the client.
+    func send(_ message: SSHMessage) throws {
+        try self.channel.writeInbound(ByteBuffer.plaintextSSHPacket(message))
+    }
+
+    /// The messages the client has sent since this was last called.
+    func clientMessages() throws -> [SSHMessage] {
+        self.channel.embeddedEventLoop.run()
+
+        var messages: [SSHMessage] = []
+        while var bytes = try self.channel.readOutbound(as: ByteBuffer.self) {
+            if bytes.readableBytesView.starts(with: "SSH-".utf8) {
+                // The client's identification string, which is not a message.
+                bytes.moveReaderIndex(forwardBy: self.clientVersion.utf8.count + 2)
+            }
+            messages.append(contentsOf: try bytes.readPlaintextSSHMessages())
+        }
+        return messages
+    }
+
+    /// Sends the server's identification string and returns the client's key exchange initialization.
+    func exchangeVersions() throws -> SSHMessage.KeyExchangeMessage {
+        try self.channel.writeInbound(ByteBuffer(string: Self.version + "\r\n"))
+        guard case .some(.keyExchange(let clientMessage)) = try self.clientMessages().first else {
+            throw NIOSSHError.invalidPacketFormat
+        }
+        return clientMessage
+    }
+
+    /// Runs one key exchange to the point where both peers have taken the new keys into use.
+    ///
+    /// - parameters:
+    ///     - clientMessage: The client's key exchange initialization, if it has sent it already. When rekeying
+    ///         the client only sends it in answer to ours.
+    ///     - beforeNewKeys: Messages to send between the server's reply and its new keys message.
+    func exchangeKeys(
+        clientMessage: SSHMessage.KeyExchangeMessage? = nil,
+        beforeNewKeys: [SSHMessage] = []
+    ) throws {
+        let serverMessage = self.keyExchange.keyExchangeMessage()
+        try self.send(.keyExchange(serverMessage))
+
+        var sent = try self.clientMessages()
+        var clientMessage = clientMessage
+        if clientMessage == nil, case .some(.keyExchange(let message)) = sent.first {
+            clientMessage = message
+            sent.removeFirst()
+        }
+        guard let clientMessage = clientMessage, case .some(.keyExchangeInit(let keyExchangeInit)) = sent.first else {
+            throw NIOSSHError.invalidPacketFormat
+        }
+
+        let reply = try self.keyExchange.reply(
+            clientVersion: self.clientVersion,
+            clientMessage: clientMessage,
+            serverMessage: serverMessage,
+            keyExchangeInit: keyExchangeInit,
+            presenting: self.hostKey.publicKey,
+            sign: { try self.hostKey.sign(digest: $0) }
+        )
+        try self.send(.keyExchangeReply(reply))
+        for message in beforeNewKeys {
+            try self.send(message)
+        }
+        try self.send(.newKeys)
+    }
+
+    /// Accepts the client's service request and its first authentication request.
+    func authenticate() throws {
+        try self.send(.serviceAccept(.init(service: "ssh-userauth")))
+        try self.send(.userAuthSuccess)
+        _ = try self.clientMessages()
     }
 }

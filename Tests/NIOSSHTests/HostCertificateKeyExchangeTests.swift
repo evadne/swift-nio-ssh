@@ -28,13 +28,18 @@ struct ScriptedKeyExchangeServer {
 
     var hostKeyAlgorithms: [Substring]
 
+    /// The key exchange algorithms to offer. The exchange itself is always `curve25519-sha256`.
+    var keyExchangeAlgorithms: [Substring] = ["curve25519-sha256"]
+
+    var encryptionAlgorithms: [Substring] = ["aes256-gcm@openssh.com"]
+
     func keyExchangeMessage() -> SSHMessage.KeyExchangeMessage {
         .init(
             cookie: ByteBuffer(repeating: 0x5A, count: 16),
-            keyExchangeAlgorithms: ["curve25519-sha256"],
+            keyExchangeAlgorithms: self.keyExchangeAlgorithms,
             serverHostKeyAlgorithms: self.hostKeyAlgorithms,
-            encryptionAlgorithmsClientToServer: ["aes256-gcm@openssh.com"],
-            encryptionAlgorithmsServerToClient: ["aes256-gcm@openssh.com"],
+            encryptionAlgorithmsClientToServer: self.encryptionAlgorithms,
+            encryptionAlgorithmsServerToClient: self.encryptionAlgorithms,
             macAlgorithmsClientToServer: ["hmac-sha2-256"],
             macAlgorithmsServerToClient: ["hmac-sha2-256"],
             compressionAlgorithmsClientToServer: ["none"],

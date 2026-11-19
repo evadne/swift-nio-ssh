@@ -47,6 +47,9 @@ extension SendsKeyExchangeMessages {
 
     mutating func writeNewKeysMessage(into buffer: inout ByteBuffer) throws {
         let result = self.keyExchangeStateMachine.sendNewKeys()
+        if self.keyExchangeStateMachine.strictKeyExchange {
+            self.serializer.strictKeyExchange = true
+        }
         try self.serializer.serialize(message: .newKeys, to: &buffer)
         self.serializer.addEncryption(result)
     }

@@ -74,6 +74,16 @@ public struct SSHClientConfiguration {
             && bytes.allSatisfy { $0 > UInt8(ascii: " ") && $0 < 0x7F && $0 != UInt8(ascii: "-") }
     }
 
+    /// Whether this client offers OpenSSH's strict key exchange extension (`kex-strict-c-v00@openssh.com`), the
+    /// countermeasure to the Terrapin attack (CVE-2023-48795). Defaults to `false`.
+    ///
+    /// Strict key exchange is used only when the server offers it too. The client then requires the server's
+    /// first packet to be its key exchange initialization, accepts no message during the first key exchange
+    /// that is not part of it, and sets its packet sequence numbers back to zero whenever new keys are taken
+    /// into use. Without it, a party on the network path can remove packets from the start of the encrypted
+    /// stream of some transport protection schemes without being detected.
+    public var strictKeyExchange: Bool = false
+
     /// Whether this client offers the OpenSSH host certificate algorithms (`*-cert-v01@openssh.com`) ahead of
     /// the plain host key algorithms. Defaults to `false`.
     ///

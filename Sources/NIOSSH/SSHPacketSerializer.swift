@@ -24,8 +24,16 @@ struct SSHPacketSerializer {
     private var state: State = .initialized
     private(set) var sequenceNumber: UInt32 = 0
 
+    /// Whether strict key exchange is in force for this connection. If it is, the sequence number starts again
+    /// from zero whenever new keys are taken into use.
+    var strictKeyExchange: Bool = false
+
     /// Encryption schemes can be added to a packet serializer whenever encryption is negotiated.
     mutating func addEncryption(_ protection: NIOSSHTransportProtection) {
+        if self.strictKeyExchange {
+            self.sequenceNumber = 0
+        }
+
         switch self.state {
         case .cleartext:
             self.state = .encrypted(protection)

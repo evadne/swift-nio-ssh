@@ -49,6 +49,10 @@ struct SSHPacketParser {
     /// The types of host key of a custom kind that the peer may present.
     private let customHostKeyTypes: [any NIOSSHVerifyingPublicKeyProtocol.Type]
 
+    /// Whether strict key exchange is in force for this connection. If it is, the sequence number starts again
+    /// from zero whenever new keys are taken into use.
+    var strictKeyExchange: Bool = false
+
     /// Whether message number 60 is to be read as `SSH_MSG_USERAUTH_INFO_REQUEST` and not as
     /// `SSH_MSG_USERAUTH_PK_OK`. The two share a number, and which one the peer means depends on the
     /// authentication method in progress, so this is set by the connection state machine.
@@ -95,6 +99,10 @@ struct SSHPacketParser {
     /// They must be added monotonically, and may only be added once, while the parser is in an
     /// idle state.
     mutating func addEncryption(_ protection: NIOSSHTransportProtection) {
+        if self.strictKeyExchange {
+            self.sequenceNumber = 0
+        }
+
         switch self.state {
         case .cleartextWaitingForLength:
             self.state = .encryptedWaitingForLength(protection)
@@ -157,6 +165,17 @@ struct SSHPacketParser {
                 return message
             }
             return nil
+        }
+    }
+
+    /// Called for a message that is no part of a key exchange and that arrived during the first one. Such a
+    /// message is harmless, unless strict key exchange is in force.
+    func validateNotInStrictKeyExchange(_ message: SSHMessage) throws {
+        if self.strictKeyExchange {
+            throw NIOSSHError.protocolViolation(
+                protocolName: "key exchange",
+                violation: "strict key exchange: unexpected message during the first key exchange: \(message)"
+            )
         }
     }
 

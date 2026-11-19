@@ -93,6 +93,10 @@ struct SSHKeyExchangeStateMachine {
     private var protectionSchemes: [NIOSSHTransportProtection.Type]
     private var previousSessionIdentifier: ByteBuffer?
 
+    /// Whether this key exchange negotiated strict key exchange for the connection. Only the first key exchange
+    /// of a connection can.
+    private(set) var strictKeyExchange: Bool = false
+
     init(
         allocator: ByteBufferAllocator,
         loop: EventLoop,
@@ -127,9 +131,14 @@ struct SSHKeyExchangeStateMachine {
         let encryptionAlgorithms = self.supportedEncryptionAlgorithms
         let macAlgorithms = self.supportedMacAlgorithms
 
+        var keyExchangeAlgorithms = Self.supportedKeyExchangeAlgorithms
+        if self.offersStrictKeyExchange {
+            keyExchangeAlgorithms.append(Self.strictKeyExchangeClientMarker)
+        }
+
         return .init(
             cookie: rng.randomCookie(allocator: self.allocator),
-            keyExchangeAlgorithms: Self.supportedKeyExchangeAlgorithms,
+            keyExchangeAlgorithms: keyExchangeAlgorithms,
             serverHostKeyAlgorithms: self.supportedHostKeyAlgorithms,
             encryptionAlgorithmsClientToServer: encryptionAlgorithms,
             encryptionAlgorithmsServerToClient: encryptionAlgorithms,
@@ -144,6 +153,11 @@ struct SSHKeyExchangeStateMachine {
     }
 
     mutating func handle(keyExchange message: SSHMessage.KeyExchangeMessage) throws -> SSHMultiMessage? {
+        // Strict key exchange is in force once both peers have offered it in their first key exchange message.
+        if self.offersStrictKeyExchange, message.keyExchangeAlgorithms.contains(Self.strictKeyExchangeServerMarker) {
+            self.strictKeyExchange = true
+        }
+
         switch self.state {
         case .keyExchangeSent(message: let ourMessage):
             switch self.role {
@@ -570,6 +584,15 @@ struct SSHKeyExchangeStateMachine {
                 || kexMessage.serverHostKeyAlgorithms.first != self.supportedHostKeyAlgorithms.first)
     }
 
+    /// Whether we offer strict key exchange in this key exchange. It is offered by clients that are configured
+    /// to, and only in the first key exchange of a connection: in any other its marker has no meaning.
+    private var offersStrictKeyExchange: Bool {
+        guard self.previousSessionIdentifier == nil, case .client(let configuration) = self.role else {
+            return false
+        }
+        return configuration.strictKeyExchange
+    }
+
     // The host key algorithms supported by this peer, in order of preference.
     private var supportedHostKeyAlgorithms: [Substring] {
         switch self.role {
@@ -618,6 +641,11 @@ extension SSHKeyExchangeStateMachine {
     static let supportedKeyExchangeAlgorithms: [Substring] = supportedKeyExchangeImplementations.flatMap {
         $0.keyExchangeAlgorithmNames
     }
+
+    /// The names with which a client and a server offer strict key exchange. These are listed among the key
+    /// exchange algorithms, but they are not algorithms and are never negotiated as one.
+    static let strictKeyExchangeClientMarker: Substring = "kex-strict-c-v00@openssh.com"
+    static let strictKeyExchangeServerMarker: Substring = "kex-strict-s-v00@openssh.com"
 
     /// All known host key algorithms.
     static let supportedServerHostKeyAlgorithms: [Substring] = [
