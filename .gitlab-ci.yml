@@ -27,5 +27,6 @@ test:debug:
 test:release:
   extends: .swift
   script:
-    - swift build -c release --build-tests -Xswiftc -warnings-as-errors
+    # A release build leaves testability off, and the tests import the module as testable.
+    - swift build -c release --build-tests -Xswiftc -enable-testing -Xswiftc -warnings-as-errors
     - swift test -c release --skip-build
