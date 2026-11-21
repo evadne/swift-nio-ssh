@@ -847,11 +847,18 @@ struct SSHConnectionStateMachine {
                 preconditionFailure("First message sent must be version, not \(message)")
             }
 
-        case .sentVersion:
-            // We can't send anything else now.
-            // TODO(cory): We could refactor the key exchange state machine to accept the delayed version from the
-            // remote peer, and then we unlock the ability to remove another RTT to the remote peer.
-            preconditionFailure("Cannot send other messages before receiving version.")
+        case .sentVersion(var state):
+            switch message {
+            case .disconnect:
+                // A disconnect may be sent once our version is out, whether or not the peer has sent its own.
+                try state.serializer.serialize(message: message, to: &buffer)
+                self.state = .sentDisconnect(state.role)
+            default:
+                // We can't send anything else now.
+                // TODO(cory): We could refactor the key exchange state machine to accept the delayed version from the
+                // remote peer, and then we unlock the ability to remove another RTT to the remote peer.
+                preconditionFailure("Cannot send other messages before receiving version.")
+            }
 
         case .keyExchange(var kex):
             switch message {

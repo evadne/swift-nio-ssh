@@ -717,6 +717,55 @@ extension NIOSSHHandler {
 // MARK: Disconnect
 
 extension NIOSSHHandler {
+    /// Send `SSH_MSG_DISCONNECT`, to end the connection in the terms of the protocol (RFC 4253 § 11.1).
+    ///
+    /// The message is written and flushed at once. The peer is told why the connection ends: by
+    /// `SSH_DISCONNECT_BY_APPLICATION`, reason code 11, where a user has asked for it to end, say. OpenSSH's server
+    /// logs the reason code and the description.
+    ///
+    /// Nothing more may be sent on the connection once the message is written, and what the peer sends from then on
+    /// is discarded. Whatever the handler holds back to send later is therefore not sent: the writes of a child
+    /// channel during a key exchange fail, and global requests that wait for user authentication to complete fail
+    /// when the handler is removed. Close the channels of the connection first where what they have written should
+    /// reach the peer.
+    ///
+    /// This does not close the channel. The caller closes it when it chooses, which may be once the transport has
+    /// delivered the message: a peer that reads the message closes the connection itself.
+    ///
+    /// `promise` is succeeded once the message has been written. It is failed with
+    /// ``NIOSSHError/ErrorType/protocolViolation`` where either peer has already sent a disconnect message, and with
+    /// `ChannelError.ioOnClosedChannel` where the handler is not in an active channel.
+    ///
+    /// This function is **not** thread-safe: it may only be called from on the channel.
+    ///
+    /// - parameters:
+    ///     - reasonCode: The reason for the disconnection, as an `SSH_DISCONNECT` reason code (RFC 4253 § 11.1).
+    ///     - description: A description of the reason, which the peer may show or log. This may be empty.
+    ///     - languageTag: The tag identifying the language used for `description`, following RFC 3066. Empty by
+    ///         default.
+    ///     - promise: An `EventLoopPromise` that will be fulfilled as described above.
+    public func sendDisconnect(
+        reasonCode: UInt32,
+        description: String,
+        languageTag: String = "",
+        promise: EventLoopPromise<Void>? = nil
+    ) {
+        guard let context = self.context, context.channel.isActive else {
+            promise?.fail(ChannelError.ioOnClosedChannel)
+            return
+        }
+
+        let message = SSHMessage.DisconnectMessage(reason: reasonCode, description: description, tag: languageTag)
+        do {
+            try self.writeMessage(.init(.disconnect(message)), context: context, promise: promise)
+        } catch {
+            promise?.fail(error)
+            return
+        }
+        self.pendingWrite = false
+        context.flush()
+    }
+
     // This function is for testing purposes only.
     internal func _disconnect() throws {
         // As this is test-only there are a bunch of preconditions in here, we don't really mind if we hit them in testing.
