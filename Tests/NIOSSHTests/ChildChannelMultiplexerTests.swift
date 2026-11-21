@@ -455,6 +455,40 @@ final class ChildChannelMultiplexerTests: XCTestCase {
         )
     }
 
+    func testInboundChannelRejectedWithAReasonSendsIt() {
+        let errorLogger = ErrorLoggingHandler()
+
+        let harness = self.harness { channel, _ in
+            channel.eventLoop.makeCompletedFuture {
+                try channel.pipeline.syncOperations.addHandler(errorLogger)
+                throw NIOSSHChannelOpenFailure(reasonCode: 1, description: "administratively prohibited")
+            }
+        }
+        defer {
+            harness.finish()
+        }
+
+        XCTAssertNoThrow(try harness.multiplexer.receiveMessage(self.openRequest(channelID: 2)))
+        XCTAssertEqual(
+            harness.flushedMessages,
+            [
+                .channelOpenFailure(
+                    .init(
+                        recipientChannel: 2,
+                        reasonCode: 1,
+                        description: "administratively prohibited",
+                        language: "en-US"
+                    )
+                )
+            ]
+        )
+        XCTAssertEqual(errorLogger.errors.count, 1)
+        XCTAssertEqual(
+            (errorLogger.errors.first as? NIOSSHError)?.channelOpenFailure,
+            NIOSSHChannelOpenFailure(reasonCode: 1, description: "administratively prohibited")
+        )
+    }
+
     func testOutboundChannelCreation() throws {
         let harness = self.harnessForbiddingInboundChannels()
         defer {

@@ -87,6 +87,8 @@ public final class NIOSSHHandler {
     ///     - role: The role of this channel in the connection, client or server.
     ///     - allocator: An allocator for `ByteBuffer`s
     ///     - inboundChildChannelInitializer: A callback that will be invoked whenever the remote peer attempts to construct a new SSH channel in a connection.
+    ///         Where the future it returns fails, the channel is refused: with the reason code and the description of a
+    ///         ``NIOSSHChannelOpenFailure`` that it fails with, and otherwise with `SSH_OPEN_CONNECT_FAILED` and no description.
     public init(
         role: SSHConnectionRole,
         allocator: ByteBufferAllocator,

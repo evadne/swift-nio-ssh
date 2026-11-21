@@ -180,4 +180,69 @@ final class ChannelOpenFailureTests: XCTestCase {
         XCTAssertNil(NIOSSHError.protocolViolation(protocolName: "channel", violation: "test").channelOpenFailure)
         XCTAssertNil(NIOSSHError.invalidSSHMessage(reason: "test").channelOpenFailure)
     }
+
+    /// Connects a client to a server whose initializer of a channel that the client asks for fails with `error`, has
+    /// the client ask for a session, and gives what the client's channel was failed with.
+    private func refuseChannelFromTheServersInitializer(failingWith error: Error) throws -> Error? {
+        let harness = TestHarness()
+        let clientHandler = NIOSSHHandler(
+            role: .client(
+                .init(
+                    userAuthDelegate: harness.clientAuthDelegate,
+                    serverAuthDelegate: harness.clientServerAuthDelegate
+                )
+            ),
+            allocator: self.channel.client.allocator,
+            inboundChildChannelInitializer: nil
+        )
+        let serverHandler = NIOSSHHandler(
+            role: .server(
+                .init(hostKeys: harness.serverHostKeys, userAuthDelegate: harness.serverAuthDelegate)
+            ),
+            allocator: self.channel.server.allocator
+        ) { channel, _ in
+            channel.eventLoop.makeFailedFuture(error)
+        }
+        try self.channel.client.pipeline.syncOperations.addHandler(clientHandler)
+        try self.channel.server.pipeline.syncOperations.addHandler(serverHandler)
+        try self.channel.activate()
+        try self.channel.interactInMemory()
+
+        let childResult = NIOLoopBoundBox<Result<Channel, Error>?>(nil, eventLoop: self.channel.client.eventLoop)
+        let childPromise = self.channel.client.eventLoop.makePromise(of: Channel.self)
+        childPromise.futureResult.whenComplete { childResult.value = $0 }
+        clientHandler.createChannel(childPromise, channelType: .session, nil)
+        try self.channel.interactInMemory()
+
+        guard case .failure(let error) = childResult.value else {
+            XCTFail("Expected the channel to fail, got \(String(describing: childResult.value))")
+            return nil
+        }
+        return error
+    }
+
+    func testAnInitializerThatFailsWithAReasonRefusesTheChannelWithIt() throws {
+        for reason: NIOSSHChannelOpenFailure in [
+            .init(reasonCode: 1, description: "administratively prohibited"),
+            .init(reasonCode: 2, description: "connect failed"),
+            .init(reasonCode: 3, description: "unknown channel type"),
+            .init(reasonCode: 4, description: "resource shortage"),
+            .init(reasonCode: 1, description: ""),
+        ] {
+            // A connection for each reason, the one that `tearDown` finishes last.
+            try self.channel.finish()
+            self.channel = BackToBackEmbeddedChannel()
+            let error = try self.refuseChannelFromTheServersInitializer(failingWith: reason)
+            XCTAssertEqual((error as? NIOSSHError)?.type, .channelSetupRejected)
+            XCTAssertEqual((error as? NIOSSHError)?.channelOpenFailure, reason)
+        }
+    }
+
+    func testAnInitializerThatFailsWithAnyOtherErrorRefusesTheChannelAsBefore() throws {
+        struct OtherError: Error {}
+        let error = try self.refuseChannelFromTheServersInitializer(failingWith: OtherError())
+        XCTAssertEqual((error as? NIOSSHError)?.type, .channelSetupRejected)
+        XCTAssertEqual((error as? NIOSSHError)?.channelOpenFailure, .init(reasonCode: 2, description: ""))
+        XCTAssertEqual(error.map { String(describing: $0) }, "NIOSSHError.channelSetupRejected: Reason: 2 ")
+    }
 }

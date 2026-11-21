@@ -20,7 +20,11 @@
 ///
 /// Where the peer refused the channel, all of the reason is chosen by the peer: do not trust it, and filter
 /// ``description`` of control characters before displaying it.
-public struct NIOSSHChannelOpenFailure: Hashable, Sendable {
+///
+/// It is also an `Error`. An initializer of a channel that the peer asked for may fail with it, to refuse the
+/// channel with its reason code and description. An initializer that fails with any other error refuses the
+/// channel with `SSH_OPEN_CONNECT_FAILED` and no description.
+public struct NIOSSHChannelOpenFailure: Error, Hashable, Sendable {
     /// The reason for the refusal, as an `SSH_OPEN` reason code (RFC 4254 § 5.1): `SSH_OPEN_ADMINISTRATIVELY_PROHIBITED`
     /// is 1, `SSH_OPEN_CONNECT_FAILED` 2, `SSH_OPEN_UNKNOWN_CHANNEL_TYPE` 3 and `SSH_OPEN_RESOURCE_SHORTAGE` 4. A
     /// peer may send any other value.

@@ -518,12 +518,13 @@ extension SSHChildChannel: Channel, ChannelCore {
     }
 
     private func initializerFailed(error: Error) {
-        // Tell the remote peer to go away.
+        // Tell the remote peer to go away, with the initializer's reason where it gave one.
         if self.state.isActiveOnNetwork {
+            let reason = error as? NIOSSHChannelOpenFailure
             let message = SSHMessage.ChannelOpenFailureMessage(
                 recipientChannel: self.state.remoteChannelIdentifier!,
-                reasonCode: 2,
-                description: "",
+                reasonCode: reason?.reasonCode ?? 2,
+                description: reason?.description ?? "",
                 language: "en-US"
             )
             self.processOutboundMessage(.channelOpenFailure(message), promise: nil)
