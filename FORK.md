@@ -37,7 +37,7 @@ The series is the commits after `FORK.md` on the branch:
 
 It has two parts. What was written for this fork stands before and after what was picked.
 
-**Written for this fork**, nineteen commits.
+**Written for this fork**, twenty-one commits.
 
 Eleven come first, each a feature that is off or has Apple's value until the application sets
 it: host certificate algorithms offered; keys of a custom kind that sign, and host keys of a
@@ -122,6 +122,29 @@ One more fix of a defect follows them, made after a test showed the defect on th
   user authentication request and in its acceptance, and
   `NIOSSHPublicKey.init(openSSHPublicKey:)`.
 
+Two more end the series, of 21 November 2026: an addition that is inert until the application
+calls it, and the fix of a defect made after a test showed it on this branch.
+
+- `NIOSSHHandler.sendDisconnect(reasonCode:description:languageTag:promise:)` writes
+  `SSH_MSG_DISCONNECT` (RFC 4253 § 11.1) and flushes it, so that an application can end a
+  connection in the terms of the protocol, with `SSH_DISCONNECT_BY_APPLICATION`, reason code
+  11, where a user asked for the end. Until then a client could only close the transport, which
+  OpenSSH's server logs as a connection closed by the client; with the message it logs
+  `Received disconnect from` the client with the reason code and the description. The
+  function does not close the channel. Nothing more is sent once the message is written, and
+  what the peer sends from then on is discarded, as the state machine already had it. Its
+  promise fails where the handler is not in an active channel, before anything is written:
+  before the version is out the packet serialiser traps on any other message. The connection
+  state machine now sends a disconnect once our version is out and before the peer's has
+  arrived, where it trapped on any message.
+- A child channel sends EOF while the peer's window is empty. RFC 4254 § 5.3 says that
+  `SSH_MSG_CHANNEL_EOF` consumes no window and can be sent when none is available, but the
+  channel delivered its pending writes, EOF among them, only while the window was open. So an
+  EOF waited for a window adjustment that the peer need never send: after data that used the
+  window up exactly, or on a channel opened with no window at all. EOF now goes once the
+  writes before it have gone, whatever the window; data still waits for the window, and EOF
+  behind it.
+
 **Picked from other works**, each after a test showed the defect on this branch; the works
 are listed under [Attribution](#attribution):
 
@@ -186,7 +209,7 @@ package or of a pull request to it, in a tree that carries Apple's `LICENSE.txt`
 
 ### Followed
 
-The nineteen patches written for this fork copy no code from another work. Where one follows
+The twenty-one patches written for this fork copy no code from another work. Where one follows
 the names or the design of another work, so that an application written against it needs
 little change if Apple takes that work, the patch's message says so. Those works, all under
 the Apache License 2.0:
