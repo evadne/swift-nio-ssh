@@ -27,6 +27,20 @@ public struct NIOSSHError: Error {
     public var type: ErrorType
 
     private var diagnostics: String?
+
+    private var openFailure: NIOSSHChannelOpenFailure? = nil
+}
+
+extension NIOSSHError {
+    /// The reason for which the opening of a channel was refused, where this error is of the type
+    /// ``ErrorType/channelSetupRejected``, and `nil` otherwise.
+    ///
+    /// For a channel that this side asked for, this is the reason that the peer gave in its
+    /// `SSH_MSG_CHANNEL_OPEN_FAILURE` (RFC 4254 § 5.1). For a channel that the peer asked for, it is the reason
+    /// that this side gave as it refused it.
+    public var channelOpenFailure: NIOSSHChannelOpenFailure? {
+        self.openFailure
+    }
 }
 
 // MARK: - Internal helper functions for error construction.
@@ -103,7 +117,11 @@ extension NIOSSHError {
 
     @inline(never)
     internal static func channelSetupRejected(reasonCode: UInt32, reason: String) -> NIOSSHError {
-        NIOSSHError(type: .channelSetupRejected, diagnostics: "Reason: \(reasonCode) \(reason)")
+        NIOSSHError(
+            type: .channelSetupRejected,
+            diagnostics: "Reason: \(reasonCode) \(reason)",
+            openFailure: NIOSSHChannelOpenFailure(reasonCode: reasonCode, description: reason)
+        )
     }
 
     @inline(never)

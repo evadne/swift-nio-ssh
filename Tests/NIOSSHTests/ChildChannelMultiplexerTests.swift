@@ -430,6 +430,31 @@ final class ChildChannelMultiplexerTests: XCTestCase {
         }
     }
 
+    func testRejectedInboundChannelGivesTheReasonThatWasSent() {
+        let errorLogger = ErrorLoggingHandler()
+
+        let harness = self.harness { channel, _ in
+            channel.eventLoop.makeCompletedFuture {
+                try channel.pipeline.syncOperations.addHandler(errorLogger)
+                throw MultiplexerTestError.rejected
+            }
+        }
+        defer {
+            harness.finish()
+        }
+
+        XCTAssertNoThrow(try harness.multiplexer.receiveMessage(self.openRequest(channelID: 2)))
+        XCTAssertEqual(
+            harness.flushedMessages,
+            [.channelOpenFailure(.init(recipientChannel: 2, reasonCode: 2, description: "", language: "en-US"))]
+        )
+        XCTAssertEqual(errorLogger.errors.count, 1)
+        XCTAssertEqual(
+            (errorLogger.errors.first as? NIOSSHError)?.channelOpenFailure,
+            NIOSSHChannelOpenFailure(reasonCode: 2, description: "")
+        )
+    }
+
     func testOutboundChannelCreation() throws {
         let harness = self.harnessForbiddingInboundChannels()
         defer {
