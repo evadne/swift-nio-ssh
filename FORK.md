@@ -37,7 +37,7 @@ The series is the commits after `FORK.md` on the branch:
 
 It has two parts. What was written for this fork stands before and after what was picked.
 
-**Written for this fork**, twenty-one commits.
+**Written for this fork**, twenty-three commits.
 
 Eleven come first, each a feature that is off or has Apple's value until the application sets
 it: host certificate algorithms offered; keys of a custom kind that sign, and host keys of a
@@ -145,6 +145,22 @@ calls it, and the fix of a defect made after a test showed it on this branch.
   writes before it have gone, whatever the window; data still waits for the window, and EOF
   behind it.
 
+Two more follow them, of the same day: an addition that is inert until the application reads it,
+and one that is inert until an initializer fails with what it adds.
+
+- `NIOSSHError.channelOpenFailure`, a `NIOSSHChannelOpenFailure` of the reason code and the
+  description of `SSH_MSG_CHANNEL_OPEN_FAILURE` (RFC 4254 § 5.1), where the error is of the
+  type `channelSetupRejected`, and `nil` otherwise. The application connects to a host through
+  a jump host in a `direct-tcpip` channel, and tells a jump host that forbids forwarding, code
+  1, from one that could not reach the far host, code 2; the code was kept only in the
+  error's private diagnostics. For a channel that the application asked for it is the peer's
+  reason, and for one that it refused its own. The error's type and its description are as
+  they were.
+- `NIOSSHChannelOpenFailure` is an `Error`, and an initializer of a channel that the peer asked
+  for may fail with one to refuse the channel with its reason code and description. Any other
+  failure refuses it with code 2 and no description, as before. The application's tests use it
+  to have the package's server role refuse a channel onward as a jump host does, with each code.
+
 **Picked from other works**, each after a test showed the defect on this branch; the works
 are listed under [Attribution](#attribution):
 
@@ -209,7 +225,7 @@ package or of a pull request to it, in a tree that carries Apple's `LICENSE.txt`
 
 ### Followed
 
-The twenty-one patches written for this fork copy no code from another work. Where one follows
+The twenty-three patches written for this fork copy no code from another work. Where one follows
 the names or the design of another work, so that an application written against it needs
 little change if Apple takes that work, the patch's message says so. Those works, all under
 the Apache License 2.0:
