@@ -2019,6 +2019,86 @@ final class ChildChannelMultiplexerTests: XCTestCase {
         )
     }
 
+    func testEOFIsSentWhileThePeersWindowIsEmpty() throws {
+        let harness = self.harnessForbiddingInboundChannels()
+        defer {
+            harness.finish()
+        }
+
+        var childChannel: Channel?
+        harness.multiplexer.createChildChannel(channelType: .session) { channel, _ in
+            childChannel = channel
+            return channel.eventLoop.makeSucceededFuture(())
+        }
+
+        guard let channel = childChannel else {
+            XCTFail("Did not create child channel")
+            return
+        }
+
+        let channelID = self.assertChannelOpen(harness.flushedMessages.first)
+        XCTAssertNoThrow(
+            try harness.multiplexer.receiveMessage(
+                self.openConfirmation(originalChannelID: channelID!, peerChannelID: 1, initialWindowSize: 0)
+            )
+        )
+
+        // EOF consumes no window (RFC 4254 § 5.3), so with nothing written before it, it goes at once.
+        let eofComplete = NIOLoopBoundBox(false, eventLoop: channel.eventLoop)
+        channel.close(mode: .output).whenSuccess {
+            eofComplete.value = true
+        }
+        XCTAssertEqual(harness.flushedMessages.count, 2)
+        XCTAssertEqual(SSHMessage.channelEOF(.init(recipientChannel: 1)), harness.flushedMessages.last)
+        XCTAssertTrue(eofComplete.value)
+    }
+
+    func testEOFWaitsForDataThatThePeersWindowHolds() throws {
+        let harness = self.harnessForbiddingInboundChannels()
+        defer {
+            harness.finish()
+        }
+
+        var childChannel: Channel?
+        harness.multiplexer.createChildChannel(channelType: .session) { channel, _ in
+            childChannel = channel
+            return channel.eventLoop.makeSucceededFuture(())
+        }
+
+        guard let channel = childChannel else {
+            XCTFail("Did not create child channel")
+            return
+        }
+
+        let channelID = self.assertChannelOpen(harness.flushedMessages.first)
+        XCTAssertNoThrow(
+            try harness.multiplexer.receiveMessage(
+                self.openConfirmation(originalChannelID: channelID!, peerChannelID: 1, initialWindowSize: 0)
+            )
+        )
+
+        // Data that the window does not admit holds back the EOF behind it.
+        var buffer = channel.allocator.buffer(capacity: 3)
+        buffer.writeBytes(0..<3)
+        channel.write(SSHChannelData(type: .channel, data: .byteBuffer(buffer)), promise: nil)
+        let eofComplete = NIOLoopBoundBox(false, eventLoop: channel.eventLoop)
+        channel.close(mode: .output).whenSuccess {
+            eofComplete.value = true
+        }
+        XCTAssertEqual(harness.flushedMessages.count, 1)
+        XCTAssertFalse(eofComplete.value)
+
+        // A window of exactly the data admits the data, and leaves none: the EOF goes after it all the same.
+        XCTAssertNoThrow(
+            try harness.multiplexer.receiveMessage(self.windowAdjust(peerChannelID: channelID!, increment: 3))
+        )
+        harness.multiplexer.parentChannelReadComplete()
+        XCTAssertEqual(harness.flushedMessages.count, 3)
+        self.assertChannelData(harness.flushedMessage(1), data: buffer, recipientChannel: 1)
+        XCTAssertEqual(SSHMessage.channelEOF(.init(recipientChannel: 1)), harness.flushedMessages.last)
+        XCTAssertTrue(eofComplete.value)
+    }
+
     func testPromiseCompletionDelaysUntilResponse() {
         let harness = self.harnessForbiddingInboundChannels()
         defer {

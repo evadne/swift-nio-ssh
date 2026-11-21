@@ -696,8 +696,10 @@ extension SSHChildChannel {
 
     /// Delivers all pending flushed writes to the parent channel.
     private func deliverPendingWrites() {
-        while self.pendingWritesFromChannel.hasMark, self.writabilityManager.windowSpaceOnNetwork > 0,
-            var write = self.pendingWritesFromChannel.first
+        // EOF consumes no window and can be sent when none is available (RFC 4254 § 5.3), once what was written
+        // before it has gone.
+        while self.pendingWritesFromChannel.hasMark, var write = self.pendingWritesFromChannel.first,
+            self.writabilityManager.windowSpaceOnNetwork > 0 || write.0.isEOF
         {
             let maxWriteLength = min(self.writabilityManager.windowSpaceOnNetwork, Int(self.peerMaxMessageSize))
             let (actualWrite, excess) = write.0.trim(maxLength: maxWriteLength)
@@ -1231,6 +1233,15 @@ extension SSHChildChannel {
                 return d.data.readableBytes
             case .eof:
                 return 0
+            }
+        }
+
+        var isEOF: Bool {
+            switch self {
+            case .data:
+                return false
+            case .eof:
+                return true
             }
         }
 
